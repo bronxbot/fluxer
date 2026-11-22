@@ -7,6 +7,8 @@
 #include <chrono>
 #include <ctime>
 #include <iomanip>
+#include <memory>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
@@ -160,14 +162,65 @@ public:
         return snap;
     }
 
+    static std::mutex& restore_mutex() {
+        static std::mutex m;
+        return m;
+    }
+
+    static std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>>& active_restores() {
+        static std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> map;
+        return map;
+    }
+
+    static std::shared_ptr<std::atomic<bool>> begin_restore(const std::string& server_id) {
+        std::lock_guard<std::mutex> lock(restore_mutex());
+        if (active_restores().count(server_id)) return nullptr;
+        auto flag = std::make_shared<std::atomic<bool>>(false);
+        active_restores()[server_id] = flag;
+        return flag;
+    }
+
+    static void end_restore(const std::string& server_id, const std::shared_ptr<std::atomic<bool>>& flag) {
+        std::lock_guard<std::mutex> lock(restore_mutex());
+        auto it = active_restores().find(server_id);
+        if (it != active_restores().end() && it->second == flag) {
+            active_restores().erase(it);
+        }
+    }
+
+    static bool request_stop_restore(const std::string& server_id) {
+        std::lock_guard<std::mutex> lock(restore_mutex());
+        auto it = active_restores().find(server_id);
+        if (it == active_restores().end()) return false;
+        it->second->store(true);
+        return true;
+    }
+
     static std::string apply_server_json(fluxerpp::cluster& bot,
                                          const std::string& server_id,
                                          const nlohmann::json& snap,
                                          bool clear_existing,
-                                         const std::string& keep_channel_id = "") {
+                                         const std::string& keep_channel_id = "",
+                                         std::shared_ptr<std::atomic<bool>> cancel_flag = nullptr) {
         int roles_created = 0;
         int channels_created = 0;
         int categories_set = 0;
+
+        auto cancelled = [&]() -> bool {
+            return cancel_flag && cancel_flag->load();
+        };
+        auto stopped_msg = [&]() -> std::string {
+            std::ostringstream ss;
+            ss << "🛑 **Restore stopped!** Created **" << roles_created << "** roles, **"
+               << channels_created << "** channels, and organized **" << categories_set << "** categories before stopping.";
+            return ss.str();
+        };
+        auto perm_abort_msg = [&](const std::string& action) -> std::string {
+            std::ostringstream ss;
+            ss << bronx::emj_warning << " **Restore aborted (missing permissions while " << action
+               << ").** Created **" << roles_created << "** roles and **" << channels_created << "** channels.";
+            return ss.str();
+        };
 
         auto srv_opt = bot.get_server(server_id);
         std::unordered_map<std::string, std::string> existing_roles_by_name;
@@ -176,12 +229,16 @@ public:
         if (srv_opt) {
             if (clear_existing) {
                 for (const auto& cid : srv_opt->channels) {
+                    if (cancelled()) return stopped_msg();
                     if (cid != keep_channel_id) {
-                        bot.rest().delete_channel(cid);
+                        auto dres = bot.rest().delete_channel(cid);
+                        if (dres.status_code == 403) return perm_abort_msg("deleting channels");
                     }
                 }
                 for (const auto& r : srv_opt->roles) {
-                    bot.rest().delete_role(server_id, r.id);
+                    if (cancelled()) return stopped_msg();
+                    auto dres = bot.rest().delete_role(server_id, r.id);
+                    if (dres.status_code == 403) return perm_abort_msg("deleting roles");
                 }
             } else {
                 for (const auto& r : srv_opt->roles) existing_roles_by_name[r.name] = r.id;
@@ -192,19 +249,23 @@ public:
             }
         }
 
+        if (cancelled()) return stopped_msg();
+
         if (clear_existing && snap.contains("name") && snap["name"].is_string()) {
             nlohmann::json srv_patch;
             srv_patch["name"] = snap["name"].get<std::string>();
             if (snap.contains("description") && snap["description"].is_string() && !snap["description"].get<std::string>().empty()) {
                 srv_patch["description"] = snap["description"].get<std::string>();
             }
-            bot.rest().edit_server(server_id, srv_patch);
+            auto sres = bot.rest().edit_server(server_id, srv_patch);
+            if (sres.status_code == 403) return perm_abort_msg("editing server");
         }
 
         std::unordered_map<std::string, std::string> role_name_to_id = existing_roles_by_name;
         std::vector<std::string> rank_order;
         if (snap.contains("roles") && snap["roles"].is_array()) {
             for (const auto& rj : snap["roles"]) {
+                if (cancelled()) return stopped_msg();
                 std::string rname = rj.value("name", "");
                 if (rname.empty()) continue;
                 std::string rid;
@@ -212,6 +273,7 @@ public:
                     rid = role_name_to_id[rname];
                 } else {
                     auto rres = bot.rest().create_role(server_id, rname);
+                    if (rres.status_code == 403) return perm_abort_msg("creating roles");
                     if (rres.success() && rres.body.is_object()) {
                         if (rres.body.contains("id") && rres.body["id"].is_string()) rid = rres.body["id"].get<std::string>();
                         else if (rres.body.contains("_id") && rres.body["_id"].is_string()) rid = rres.body["_id"].get<std::string>();
@@ -231,11 +293,12 @@ public:
                         rpatch["permissions"] = rj["permissions"];
                     }
                     if (!rpatch.empty()) {
-                        bot.rest().edit_role(server_id, rid, rpatch);
+                        auto eresp = bot.rest().edit_role(server_id, rid, rpatch);
+                        if (eresp.status_code == 403) return perm_abort_msg("editing roles");
                     }
                 }
             }
-            if (!rank_order.empty()) {
+            if (!rank_order.empty() && !cancelled()) {
                 bot.rest().edit_role_ranks(server_id, rank_order);
             }
         }
@@ -243,6 +306,7 @@ public:
         std::unordered_map<std::string, std::string> chan_name_to_id = existing_chans_by_name;
         if (snap.contains("channels") && snap["channels"].is_array()) {
             for (const auto& cj : snap["channels"]) {
+                if (cancelled()) return stopped_msg();
                 std::string cname = cj.value("name", "");
                 if (cname.empty()) continue;
                 std::string ctype_raw = cj.value("channel_type", "TextChannel");
@@ -253,6 +317,7 @@ public:
                     cid = chan_name_to_id[cname];
                 } else {
                     auto cres = bot.rest().create_channel(server_id, ctype, cname);
+                    if (cres.status_code == 403) return perm_abort_msg("creating channels");
                     if (cres.success() && cres.body.is_object()) {
                         if (cres.body.contains("_id") && cres.body["_id"].is_string()) cid = cres.body["_id"].get<std::string>();
                         else if (cres.body.contains("id") && cres.body["id"].is_string()) cid = cres.body["id"].get<std::string>();
@@ -272,18 +337,22 @@ public:
                         cpatch["nsfw"] = true;
                     }
                     if (!cpatch.empty()) {
-                        bot.rest().edit_channel(cid, cpatch);
+                        auto echan = bot.rest().edit_channel(cid, cpatch);
+                        if (echan.status_code == 403) return perm_abort_msg("editing channels");
                     }
                     if (cj.contains("default_permissions") && cj["default_permissions"].is_number_integer()) {
-                        bot.rest().set_channel_default_permission(cid, cj["default_permissions"].get<int64_t>());
+                        auto dpres = bot.rest().set_channel_default_permission(cid, cj["default_permissions"].get<int64_t>());
+                        if (dpres.status_code == 403) return perm_abort_msg("setting channel permissions");
                     }
                     if (cj.contains("role_permissions") && cj["role_permissions"].is_object()) {
                         for (auto& [rname, perm] : cj["role_permissions"].items()) {
+                            if (cancelled()) return stopped_msg();
                             auto rit = role_name_to_id.find(rname);
                             if (rit != role_name_to_id.end() && perm.is_object()) {
                                 int64_t allow = perm.value("a", 0LL);
                                 int64_t deny = perm.value("d", 0LL);
-                                bot.rest().set_channel_permission(cid, rit->second, allow, deny);
+                                auto rpres = bot.rest().set_channel_permission(cid, rit->second, allow, deny);
+                                if (rpres.status_code == 403) return perm_abort_msg("setting role permissions");
                             }
                         }
                     }
@@ -296,10 +365,12 @@ public:
 
         if (snap.contains("categories") && snap["categories"].is_array()) {
             for (const auto& cat : snap["categories"]) {
+                if (cancelled()) return stopped_msg();
                 std::string title = cat.value("title", "");
                 if (title.empty() || !cat.contains("channels") || !cat["channels"].is_array()) continue;
                 categories_set++;
                 for (const auto& ch_name_j : cat["channels"]) {
+                    if (cancelled()) return stopped_msg();
                     if (!ch_name_j.is_string()) continue;
                     auto cit = chan_name_to_id.find(ch_name_j.get<std::string>());
                     if (cit != chan_name_to_id.end()) {
@@ -471,8 +542,8 @@ public:
         bot.register_command({
             "backup",
             {"bk", "backups"},
-            "Xenon-style server backups: create, list, info, load, delete, auto.",
-            "backup <create|list|info|load|delete|auto> [args]",
+            "Xenon-style server backups: create, list, info, load, stop, delete, auto.",
+            "backup <create|list|info|load|stop|delete|auto> [args]",
             {"<subcommand>", "[args]"},
             [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (msg.server_id.empty()) {
@@ -487,12 +558,13 @@ public:
                 if (args.empty()) {
                     bot.send_message(msg.channel_id,
                         "💾 **Server Backup Commands (Xenon-style)**\n"
-                        "• `.backup create [name]` — Save a full snapshot of roles, categories, channels, permissions & bans\n"
-                        "• `.backup list` — List saved backups for this server & your account\n"
-                        "• `.backup info <id>` — Preview a backup's contents\n"
-                        "• `.backup load <id> [clear]` — Restore a backup onto this server (cross-platform!)\n"
-                        "• `.backup delete <id>` — Delete a backup\n"
-                        "• `.backup auto [on|off|<hours>]` — Configure automatic scheduled backups");
+                        "• `.backup create [name]` - Save a full snapshot of roles, categories, channels, permissions & bans\n"
+                        "• `.backup list` - List saved backups for this server & your account\n"
+                        "• `.backup info <id>` - Preview a backup's contents\n"
+                        "• `.backup load <id> [clear]` - Restore a backup onto this server (cross-platform!)\n"
+                        "• `.backup stop` - Stop an active backup or preset restore in this server\n"
+                        "• `.backup delete <id>` - Delete a backup\n"
+                        "• `.backup auto [on|off|<hours>]` - Configure automatic scheduled backups");
                     return;
                 }
 
@@ -589,12 +661,25 @@ public:
                             bot.send_message(msg.channel_id, bronx::emj_no + " Backup data is corrupted.");
                             return;
                         }
+                        auto cancel_flag = begin_restore(msg.server_id);
+                        if (!cancel_flag) {
+                            bot.send_message(msg.channel_id, bronx::emj_warning + " A backup or preset restore is already running in this server. Use `.backup stop` to cancel it.");
+                            return;
+                        }
                         bot.send_message(msg.channel_id, "⏳ Loading backup `" + b_opt->backup_id + "`" +
-                            (clear_existing ? " (clearing existing channels & roles)..." : " (merging into server)..."));
-                        std::thread([&bot, msg, snap, clear_existing]() {
-                            std::string res = apply_server_json(bot, msg.server_id, snap, clear_existing, msg.channel_id);
+                            (clear_existing ? " (clearing existing channels & roles)..." : " (merging into server)...") +
+                            " Use `.backup stop` to cancel.");
+                        std::thread([&bot, msg, snap, clear_existing, cancel_flag]() {
+                            std::string res = apply_server_json(bot, msg.server_id, snap, clear_existing, msg.channel_id, cancel_flag);
+                            end_restore(msg.server_id, cancel_flag);
                             bot.send_message(msg.channel_id, res);
                         }).detach();
+                    } else if (sub == "stop" || sub == "cancel") {
+                        if (request_stop_restore(msg.server_id)) {
+                            bot.send_message(msg.channel_id, "🛑 Stopping the active backup/preset restore for this server...");
+                        } else {
+                            bot.send_message(msg.channel_id, "ℹ️ No backup or preset restore is currently running in this server.");
+                        }
                     } else if (sub == "delete" && args.size() >= 2) {
                         if (bronx::g_db->delete_server_backup(args[1])) {
                             bot.send_message(msg.channel_id, "🗑️ Deleted backup `" + args[1] + "`.");
@@ -748,9 +833,15 @@ public:
                             bot.send_message(msg.channel_id, bronx::emj_no + " Preset `" + name + "` not found.");
                             return;
                         }
-                        bot.send_message(msg.channel_id, "⏳ Applying preset `" + name + "`...");
-                        std::thread([&bot, msg, snap, clear_existing]() {
-                            std::string res = apply_server_json(bot, msg.server_id, snap, clear_existing, msg.channel_id);
+                        auto cancel_flag = begin_restore(msg.server_id);
+                        if (!cancel_flag) {
+                            bot.send_message(msg.channel_id, bronx::emj_warning + " A backup or preset restore is already running in this server. Use `.backup stop` to cancel it.");
+                            return;
+                        }
+                        bot.send_message(msg.channel_id, "⏳ Applying preset `" + name + "`... Use `.backup stop` to cancel.");
+                        std::thread([&bot, msg, snap, clear_existing, cancel_flag]() {
+                            std::string res = apply_server_json(bot, msg.server_id, snap, clear_existing, msg.channel_id, cancel_flag);
+                            end_restore(msg.server_id, cancel_flag);
                             bot.send_message(msg.channel_id, res);
                         }).detach();
                     } else if (sub == "save" && args.size() >= 2) {
