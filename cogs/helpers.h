@@ -1,0 +1,303 @@
+#pragma once
+#include <string>
+#include <vector>
+#include <map>
+#include <mutex>
+#include <chrono>
+#include <ctime>
+#include <sstream>
+#include <iomanip>
+#include <iostream>
+#include <thread>
+#include <functional>
+#include <cstdlib>
+#include <algorithm>
+#include "fluxerpp/cluster.h"
+#include "fluxerpp/utils/ulid.h"
+#include <nlohmann/json.hpp>
+#include "../database.h"
+#include <memory>
+
+namespace bronx {
+    inline std::shared_ptr<Database> g_db = nullptr;
+}
+
+namespace bronx::helpers {
+
+inline uint64_t parse_duration(const std::string& input) {
+    uint64_t total_seconds = 0;
+    std::string current_num = "";
+    for (size_t i = 0; i < input.size(); ++i) {
+        char c = input[i];
+        if (std::isdigit(c)) {
+            current_num += c;
+        } else {
+            if (current_num.empty()) continue;
+            
+            std::string unit = "";
+            while (i < input.size() && std::isalpha(input[i])) {
+                unit += std::tolower(input[i]);
+                i++;
+            }
+            i--; 
+            
+            uint64_t val = 0;
+            try { val = std::stoull(current_num); } catch (...) { return 0; }
+            
+            if (unit == "s" || unit == "sec" || unit == "seconds") total_seconds += val;
+            else if (unit == "m" || unit == "min" || unit == "minutes") total_seconds += val * 60;
+            else if (unit == "h" || unit == "hr" || unit == "hours") total_seconds += val * 3600;
+            else if (unit == "d" || unit == "day" || unit == "days") total_seconds += val * 86400;
+            else if (unit == "w" || unit == "wk" || unit == "weeks") total_seconds += val * 604800;
+            else if (unit == "mo" || unit == "month" || unit == "months") total_seconds += val * 2592000;
+            else if (unit == "y" || unit == "yr" || unit == "years") total_seconds += val * 31536000;
+            else return 0;
+            
+            current_num = "";
+        }
+    }
+    
+    if (total_seconds == 0 && !current_num.empty()) {
+        try { return std::stoull(current_num) * 60; } catch (...) { return 0; }
+    }
+    
+    return total_seconds;
+}
+
+inline std::string format_epoch_ms(uint64_t ms) {
+    std::time_t sec = ms / 1000;
+    struct tm buf;
+    localtime_r(&sec, &buf);
+    
+    char date_str[64];
+    std::strftime(date_str, sizeof(date_str), "%b %d %Y", &buf);
+    return date_str;
+}
+
+inline std::string format_iso_string(const std::string& iso) {
+    if (iso.empty()) return "none";
+    struct tm t = {};
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    if (sscanf(iso.c_str(), "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute, &second) >= 3) {
+        t.tm_year = year - 1900;
+        t.tm_mon = month - 1;
+        t.tm_mday = day;
+        t.tm_hour = hour;
+        t.tm_min = minute;
+        t.tm_sec = second;
+        t.tm_isdst = -1;
+        
+        std::time_t sec = std::mktime(&t);
+        struct tm buf;
+        localtime_r(&sec, &buf);
+        char date_str[64];
+        std::strftime(date_str, sizeof(date_str), "%b %d %Y", &buf);
+        return date_str;
+    }
+    return iso;
+}
+
+struct PaginationSession {
+    int current_page = 0;
+    int max_pages = 3;
+    std::string user_id;
+    std::string type = "general";
+};
+
+inline std::map<std::string, PaginationSession> g_pages;
+inline std::mutex g_pages_mutex;
+
+inline int get_highest_rank(fluxerpp::cluster& bot, const std::string& server_id, const fluxerpp::models::Member& member) {
+    auto server_opt = bot.get_server(server_id);
+    if (!server_opt) return 999999;
+    
+    if (server_opt->owner == member.id) {
+        return -1;
+    }
+    
+    int highest = 999999;
+    for (const auto& r_id : member.roles) {
+        for (const auto& r : server_opt->roles) {
+            if (r.id == r_id) {
+                if (r.rank < highest) {
+                    highest = r.rank;
+                }
+            }
+        }
+    }
+    return highest;
+}
+
+inline bool check_hierarchy(fluxerpp::cluster& bot, const std::string& server_id, const fluxerpp::models::Member& a, const fluxerpp::models::Member& b) {
+    int rank_a = get_highest_rank(bot, server_id, a);
+    int rank_b = get_highest_rank(bot, server_id, b);
+    return rank_a < rank_b;
+}
+
+inline int get_role_rank(fluxerpp::cluster& bot, const std::string& server_id, const std::string& role_id) {
+    auto server_opt = bot.get_server(server_id);
+    if (!server_opt) return 999999;
+    for (const auto& r : server_opt->roles) {
+        if (r.id == role_id) {
+            return r.rank;
+        }
+    }
+    return 999999;
+}
+
+inline std::string get_future_iso_timestamp(int offset_seconds) {
+    auto now = std::chrono::system_clock::now();
+    auto future = now + std::chrono::seconds(offset_seconds);
+    std::time_t future_time = std::chrono::system_clock::to_time_t(future);
+    struct tm buf;
+    gmtime_r(&future_time, &buf);
+    char out_str[64];
+    std::strftime(out_str, sizeof(out_str), "%Y-%m-%dT%H:%M:%SZ", &buf);
+    return out_str;
+}
+
+inline void resolve_user(fluxerpp::cluster& bot, const std::string& server_id, const std::string& query, std::function<void(fluxerpp::models::User, fluxerpp::models::Member, bool)> callback) {
+    if (query.empty()) {
+        callback({}, {}, false);
+        return;
+    }
+
+    std::string target_id = query;
+    if (target_id.rfind("<@", 0) == 0 && target_id.back() == '>') {
+        target_id = target_id.substr(2, target_id.size() - 3);
+    }
+
+    if (target_id.size() == 26 && target_id.find_first_not_of("0123456789ABCDEFGHJKMNPQRSTVWXYZabcdefghjkmnpqrstvwxyz") == std::string::npos) {
+        bot.fetch_user(target_id, [&bot, server_id, callback](fluxerpp::models::User user, bool success) {
+            if (!success) {
+                callback({}, {}, false);
+                return;
+            }
+            if (!server_id.empty()) {
+                bot.fetch_member(server_id, user.id, [user, callback](fluxerpp::models::Member member, bool success_mem) {
+                    callback(user, member, success_mem);
+                });
+            } else {
+                callback(user, {}, true);
+            }
+        });
+        return;
+    }
+
+    std::string search_username = target_id;
+    std::string search_discrim = "";
+    auto hash_pos = target_id.find('#');
+    if (hash_pos != std::string::npos) {
+        search_username = target_id.substr(0, hash_pos);
+        search_discrim = target_id.substr(hash_pos + 1);
+    }
+
+    std::thread([&bot, server_id, search_username, search_discrim, callback]() {
+        try {
+            auto res = bot.rest().get_server_members(server_id);
+            if (!res.success()) {
+                callback({}, {}, false);
+                return;
+            }
+
+            nlohmann::json users_arr = nlohmann::json::array();
+            nlohmann::json members_arr = nlohmann::json::array();
+
+            if (res.body.is_array()) {
+                members_arr = res.body;
+            } else if (res.body.is_object()) {
+                if (res.body.contains("members") && res.body["members"].is_array()) {
+                    members_arr = res.body["members"];
+                }
+                if (res.body.contains("users") && res.body["users"].is_array()) {
+                    users_arr = res.body["users"];
+                }
+            }
+
+            std::map<std::string, fluxerpp::models::User> user_map;
+            for (const auto& u : users_arr) {
+                auto user = fluxerpp::models::User::from_json(u);
+                user_map[user.id] = user;
+            }
+
+            auto to_lower = [](std::string s) {
+                for (auto& c : s) c = std::tolower(c);
+                return s;
+            };
+
+            std::string lower_username = to_lower(search_username);
+
+            for (const auto& m_json : members_arr) {
+                auto member = fluxerpp::models::Member::from_json(m_json);
+                fluxerpp::models::User user;
+                
+                auto it = user_map.find(member.id);
+                if (it != user_map.end()) {
+                    user = it->second;
+                } else {
+                    continue;
+                }
+
+                std::string user_name_lower = to_lower(user.username);
+                std::string nickname_lower = member.nickname ? to_lower(*member.nickname) : "";
+
+                bool name_match = (user_name_lower == lower_username || nickname_lower == lower_username);
+                bool discrim_match = search_discrim.empty() || (user.discriminator == search_discrim);
+
+                if (name_match && discrim_match) {
+                    bot.fetch_user(user.id, [member, callback](fluxerpp::models::User full_user, bool success_user) {
+                        if (success_user) {
+                            callback(full_user, member, true);
+                        } else {
+                            callback({}, {}, false);
+                        }
+                    });
+                    return;
+                }
+            }
+
+            auto search_res = bot.rest().search_users(search_username);
+            if (search_res.success() && search_res.body.is_array()) {
+                for (const auto& u : search_res.body) {
+                    auto user = fluxerpp::models::User::from_json(u);
+                    if (to_lower(user.username) == lower_username && (search_discrim.empty() || user.discriminator == search_discrim)) {
+                        bot.fetch_user(user.id, [callback](fluxerpp::models::User full_user, bool success_user) {
+                            if (success_user) {
+                                callback(full_user, {}, true);
+                            } else {
+                                callback({}, {}, false);
+                            }
+                        });
+                        return;
+                    }
+                }
+            }
+
+            callback({}, {}, false);
+        } catch (...) {
+            callback({}, {}, false);
+        }
+    }).detach();
+}
+
+inline std::string upload_avatar(fluxerpp::cluster& bot, const std::string& input_url) {
+    if (input_url.empty()) return "";
+    if (input_url.rfind(bot.config().autumn_url, 0) == 0) {
+        return input_url;
+    }
+    try {
+        std::string file_id = bot.rest().upload_from_url(input_url);
+        if (!file_id.empty()) {
+            return bot.config().autumn_url + "/attachments/" + file_id;
+        }
+    } catch (...) {
+        // Fall back to original url if download/upload fails
+    }
+    return input_url;
+}
+
+} // namespace bronx::helpers
+
+namespace bronx::cogs {
+    using helpers::parse_duration;
+}

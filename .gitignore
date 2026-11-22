@@ -1,0 +1,24 @@
+# Build artifacts
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.o
+*.a
+*.so
+*.dylib
+
+# Credentials & environment
+.env
+.env.*
+!.env.example
+
+# Logs & debug dumps
+*.log
+curl_out.txt
+podman_logs.txt
+podman_ps.txt
+ps_bridge.txt
+test_msg_response.txt
+test_reactions_out.txt
