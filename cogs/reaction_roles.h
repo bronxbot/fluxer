@@ -49,7 +49,7 @@ inline std::string display_emoji(const std::string& raw_emoji) {
     return raw_emoji;
 }
 
-inline std::string format_rr_description(const std::vector<bronx::Database::RRRule>& rules) {
+inline std::string format_rr_description(const std::vector<bronx::Database::RRRule>& rules, fluxerpp::cluster* bot = nullptr, const std::string& server_id = "") {
     if (rules.empty()) return "";
     
     // Group rules by emoji while preserving the order of first appearance
@@ -67,16 +67,34 @@ inline std::string format_rr_description(const std::vector<bronx::Database::RRRu
         emoji_roles[rule.emoji_id].push_back({rule.role_id, rule.rule_type});
     }
 
+    std::unordered_map<std::string, std::string> role_names;
+    if (bot && !server_id.empty()) {
+        auto server_opt = bot->get_server(server_id);
+        if (server_opt) {
+            for (const auto& r : server_opt->roles) {
+                role_names[r.id] = r.name;
+            }
+        }
+    }
+
     std::string desc;
     for (const auto& emoji : ordered_emojis) {
         desc += "• " + display_emoji(emoji) + " ➔ ";
         const auto& details = emoji_roles[emoji];
         for (size_t i = 0; i < details.size(); ++i) {
             if (i > 0) desc += " ";
-            if (details[i].rule_type == "remove") {
-                desc += "[Remove] <%" + details[i].role_id + ">";
+            std::string role_disp;
+            auto it = role_names.find(details[i].role_id);
+            if (it != role_names.end()) {
+                role_disp = "**" + it->second + "**";
             } else {
-                desc += "<%" + details[i].role_id + ">";
+                role_disp = "**" + details[i].role_id + "**";
+            }
+
+            if (details[i].rule_type == "remove") {
+                desc += "[Remove] " + role_disp;
+            } else {
+                desc += role_disp;
             }
         }
         desc += "\n";
@@ -229,7 +247,7 @@ inline std::vector<EmojiRolePair> parse_emoji_role_pairs(const std::string& text
 }
 
 
-inline fluxerpp::models::MessagePayload build_rr_payload(const bronx::Database::RRMessage& rr_msg) {
+inline fluxerpp::models::MessagePayload build_rr_payload(const bronx::Database::RRMessage& rr_msg, fluxerpp::cluster* bot = nullptr) {
     fluxerpp::models::MessagePayload payload;
     nlohmann::json embed = nlohmann::json::object();
     
@@ -257,7 +275,7 @@ inline fluxerpp::models::MessagePayload build_rr_payload(const bronx::Database::
     }
     
     if (!rr_msg.rules.empty()) {
-        desc += format_rr_description(rr_msg.rules);
+        desc += format_rr_description(rr_msg.rules, bot, rr_msg.server_id);
         std::vector<std::string> rx;
         for (const auto& rule : rr_msg.rules) {
             rx.push_back(rule.emoji_id);
@@ -292,19 +310,20 @@ public:
         bot.register_command({
             "rr",
             {"reactionrole", "reactionroles"},
-            "manage reaction roles configs (subcommands: create, add, edit, parse, list, delete).",
+             "manage reaction roles configs (subcommands: create, add, remove, edit, parse, list, delete).",
             "",
             {"<subcommand>", "[args...]"},
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 std::cout << "[bronx command] handling rr...\n";
                 if (args.empty()) {
                     std::string pfx = msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
-                    bot.send_message(msg.channel_id, "usage: `" + pfx + "rr <create|send|add|addremove|type|edit|parse|list|delete> [args...]`\n"
+                    bot.send_message(msg.channel_id, "usage: `" + pfx + "rr <create|send|add|addremove|remove|type|edit|parse|list|delete> [args...]`\n"
                                                      "examples:\n"
                                                      "• `" + pfx + "rr create verified`\n"
                                                      "• `" + pfx + "rr send verified #general`\n"
                                                      "• `" + pfx + "rr add verified :thumbsup: Member`\n"
                                                      "• `" + pfx + "rr addremove verified :check: Unverified` (or `" + pfx + "rr add verified :check: Unverified remove`)\n"
+                                                     "• `" + pfx + "rr remove verified :thumbsup: Member` (or `" + pfx + "rr remove verified` to remove all reaction roles)\n"
                                                      "• `" + pfx + "rr type verified verify` (types: standard, panel, verify)\n"
                                                      "• `" + pfx + "rr edit verified :thumbsup: emoji :heart:`\n"
                                                      "• `" + pfx + "rr parse <modal> <message_id>` — import rules into a new modal\n"
@@ -364,8 +383,9 @@ public:
                     }
 
                     bronx::Database::RRMessage tmp_msg;
+                    tmp_msg.server_id = msg.server_id;
                     tmp_msg.modal_name = modalname;
-                    fluxerpp::models::MessagePayload payload = build_rr_payload(tmp_msg);
+                    fluxerpp::models::MessagePayload payload = build_rr_payload(tmp_msg, &bot);
 
                     bot.send_message(msg.channel_id, payload, [modalname, msg](fluxerpp::models::Message res, bool ok) {
                         if (ok) {
@@ -402,20 +422,34 @@ public:
                         if (chan_arg.rfind("<#", 0) == 0 && chan_arg.back() == '>') {
                             target_channel = chan_arg.substr(2, chan_arg.size() - 3);
                         } else {
+                            // Strip a leading '#' if someone typed a channel name instead of mentioning it
+                            if (!chan_arg.empty() && chan_arg[0] == '#') {
+                                chan_arg = chan_arg.substr(1);
+                            }
+                            // Validate: must look like a ULID (26 alphanumeric chars)
+                            bool looks_like_id = (chan_arg.size() == 26 &&
+                                chan_arg.find_first_not_of("0123456789ABCDEFGHJKMNPQRSTVWXYZabcdefghjkmnpqrstvwxyz") == std::string::npos);
+                            if (!looks_like_id) {
+                                std::string pfx = msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
+                                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid channel: `" + args[2] + "`. please mention the channel with `<#channel_id>` (e.g. `" + pfx + "rr send " + modalname + " <#channel_id>`).");
+                                return;
+                            }
                             target_channel = chan_arg;
                         }
                     }
 
-                    fluxerpp::models::MessagePayload payload = build_rr_payload(*rr_msg_opt);
+                    fluxerpp::models::MessagePayload payload = build_rr_payload(*rr_msg_opt, &bot);
 
                     bot.send_message(target_channel, payload, [modalname, msg, target_channel, rr_msg_opt, &bot](fluxerpp::models::Message res, bool ok) {
                         if (ok) {
                             g_db->add_rr_message(res.id, target_channel, msg.server_id, modalname);
                             std::cout << "[bronx rr] sent additional reaction role modal: " << modalname << " (message: " << res.id << ")\n";
                             
-                            // Copy rules to database and cache
+                            // Copy rules to database, cache, and add reactions
                             for (const auto& rule : rr_msg_opt->rules) {
-                                g_db->add_rr_rule(res.id, rule.emoji_id, rule.role_id);
+                                g_db->add_rr_rule(res.id, rule.emoji_id, rule.role_id, rule.rule_type);
+                                bot.react_to_message(target_channel, res.id, rule.emoji_id);
+                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                             }
                         }
                     });
@@ -519,10 +553,8 @@ public:
                     std::string emoji = clean_emoji(raw_emoji);
 
                     // Parse optional trailing "add" or "remove" specifier
-                    std::string rule_type = "add";
-                    if (subcommand == "addremove") {
-                        rule_type = "remove";
-                    } else {
+                    std::string rule_type = (subcommand == "addremove") ? "remove" : "add";
+                    {
                         size_t last_space = role_query.find_last_of(" ");
                         if (last_space != std::string::npos) {
                             std::string last_word = role_query.substr(last_space + 1);
@@ -643,7 +675,7 @@ public:
 
                                         auto updated_rr = g_db->get_rr_message(target_msg_id);
                                         if (updated_rr) {
-                                            fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr);
+                                            fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr, &bot);
 
                                             bot.edit_message(updated_rr->channel_id, target_msg_id, payload);
                                         }
@@ -658,7 +690,7 @@ public:
                         if (is_role_dangerous(selected_role)) {
                             fluxerpp::models::MessagePayload payload;
                             nlohmann::json embed = nlohmann::json::object();
-                            embed["title"] = "⚠️ Warning: Dangerous Role Permissions";
+                            embed["title"] = "" + bronx::emj_warning + " Warning: Dangerous Role Permissions";
                             embed["colour"] = "#F1C40F";
                             embed["description"] = "The role **" + selected_role.name + "** contains administrative or moderator permissions (e.g. Manage Roles, Ban, Kick, etc.).\n"
                                                   "Are you sure you want to add this role as a reaction role? Anyone will be able to get these permissions by reacting!\n\n"
@@ -684,7 +716,18 @@ public:
                     };
 
                     if (matching_roles.empty()) {
-                        bot.send_message(msg.channel_id, "could not find any role matching \"" + role_query + "\".");
+                        std::string lower_rq = role_query;
+                        std::transform(lower_rq.begin(), lower_rq.end(), lower_rq.begin(), ::tolower);
+                        if (lower_rq == "remove" || lower_rq == "add") {
+                            std::string pfx = msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
+                            bot.send_message(msg.channel_id, "could not find any role matching \"" + role_query + "\".\n"
+                                                             "• If you were trying to **remove** this reaction role mapping, use:\n"
+                                                             "  `" + pfx + "rr remove " + target + " " + raw_emoji + "`\n"
+                                                             "• If you were trying to **add** a mapping, make sure to specify the role name:\n"
+                                                             "  `" + pfx + "rr " + subcommand + " " + target + " " + raw_emoji + " <role_name>`");
+                        } else {
+                            bot.send_message(msg.channel_id, "could not find any role matching \"" + role_query + "\".");
+                        }
                         return;
                     }
 
@@ -761,7 +804,7 @@ public:
                                 updated = true;
                                 auto updated_rr = g_db->get_rr_message(target);
                                 if (updated_rr) {
-                                    fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr);
+                                    fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr, &bot);
                                     bot.edit_message(updated_rr->channel_id, target, payload);
                                 }
                             }
@@ -773,7 +816,7 @@ public:
                                 updated = true;
                                 auto updated_rr = g_db->get_rr_message(msg_id);
                                 if (updated_rr) {
-                                    fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr);
+                                    fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr, &bot);
                                     bot.edit_message(updated_rr->channel_id, msg_id, payload);
                                 }
                             }
@@ -781,9 +824,9 @@ public:
                     }
 
                     if (updated) {
-                        bot.send_message(msg.channel_id, "✅ successfully updated reaction role type for target `" + target + "` to `" + type + "`.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " successfully updated reaction role type for target `" + target + "` to `" + type + "`.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ could not find any active modals or reaction role messages matching `" + target + "`.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " could not find any active modals or reaction role messages matching `" + target + "`.");
                     }
                     return;
                 }
@@ -794,27 +837,56 @@ public:
                     std::string role_query = "";
                     bool resolved_target = false;
 
-                    if (!msg.replies.empty() && args.size() >= 3) {
-                        if (args[1] == "^") {
+                    if (args.size() == 1) {
+                        if (!msg.replies.empty()) {
                             target = msg.replies[0];
-                            size_t arg_idx = 2;
-                            if (arg_idx < args.size() && args[arg_idx].rfind("<#", 0) == 0 && args[arg_idx].back() == '>') arg_idx++;
-                            if (arg_idx < args.size()) raw_emoji = args[arg_idx++];
-                            for (size_t i = arg_idx; i < args.size(); ++i) {
-                                if (i > arg_idx) role_query += " ";
-                                role_query += args[i];
-                            }
                             resolved_target = true;
+                        }
+                    } else if (args.size() >= 2) {
+                        if (args[1] == "^") {
+                            if (!msg.replies.empty()) {
+                                target = msg.replies[0];
+                                resolved_target = true;
+                            } else {
+                                fluxerpp::models::MessageQuery query;
+                                query.before = msg.id;
+                                query.limit = 1;
+                                auto res = bot.rest().get_messages(msg.channel_id, query);
+                                if (res.success()) {
+                                    if (res.body.is_array() && !res.body.empty()) {
+                                        auto m = fluxerpp::models::Message::from_json(res.body[0]);
+                                        target = m.id;
+                                        resolved_target = true;
+                                    } else if (res.body.is_object() && res.body.contains("messages") && res.body["messages"].is_array() && !res.body["messages"].empty()) {
+                                        auto m = fluxerpp::models::Message::from_json(res.body["messages"][0]);
+                                        target = m.id;
+                                        resolved_target = true;
+                                    }
+                                }
+                            }
+                            if (resolved_target) {
+                                size_t arg_idx = 2;
+                                if (arg_idx < args.size() && args[arg_idx].rfind("<#", 0) == 0 && args[arg_idx].back() == '>') arg_idx++;
+                                if (arg_idx < args.size()) raw_emoji = args[arg_idx++];
+                                for (size_t i = arg_idx; i < args.size(); ++i) {
+                                    if (i > arg_idx) role_query += " ";
+                                    role_query += args[i];
+                                }
+                            }
                         } else {
                             bool arg1_is_target = false;
                             if (args[1].size() == 26 && args[1].find_first_not_of("0123456789ABCDEFGHJKMNPQRSTVWXYZabcdefghjkmnpqrstvwxyz") == std::string::npos) {
                                 arg1_is_target = true;
                             } else {
                                 std::vector<std::string> msg_ids = g_db->get_message_ids_by_modal(msg.server_id, args[1]);
-                                if (!msg_ids.empty()) arg1_is_target = true;
+                                if (!msg_ids.empty()) {
+                                    arg1_is_target = true;
+                                }
                             }
-                            if (!arg1_is_target) {
+
+                            if (!arg1_is_target && !msg.replies.empty()) {
                                 target = msg.replies[0];
+                                resolved_target = true;
                                 size_t arg_idx = 1;
                                 if (arg_idx < args.size() && args[arg_idx].rfind("<#", 0) == 0 && args[arg_idx].back() == '>') arg_idx++;
                                 if (arg_idx < args.size()) raw_emoji = args[arg_idx++];
@@ -822,58 +894,85 @@ public:
                                     if (i > arg_idx) role_query += " ";
                                     role_query += args[i];
                                 }
+                            } else {
+                                target = args[1];
                                 resolved_target = true;
+                                size_t arg_idx = 2;
+                                if (arg_idx < args.size() && args[arg_idx].rfind("<#", 0) == 0 && args[arg_idx].back() == '>') arg_idx++;
+                                if (arg_idx < args.size()) raw_emoji = args[arg_idx++];
+                                for (size_t i = arg_idx; i < args.size(); ++i) {
+                                    if (i > arg_idx) role_query += " ";
+                                    role_query += args[i];
+                                }
                             }
                         }
                     }
 
                     if (!resolved_target) {
-                        if (args.size() < 3) {
-                            std::string pfx = msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
-                            bot.send_message(msg.channel_id, "usage:\n"
-                                                             "• `" + pfx + "rr remove <modalname> <emoji> [role]`\n"
-                                                             "• `" + pfx + "rr remove <messageID> <emoji> [role]`\n"
-                                                             "• `" + pfx + "rr remove ^ <emoji> [role]`");
+                        std::string pfx = msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
+                        bot.send_message(msg.channel_id, "usage:\n"
+                                                         "• `" + pfx + "rr remove <modalname|messageID> [emoji] [role]`\n"
+                                                         "• `" + pfx + "rr remove ^ [emoji] [role]`");
+                        return;
+                    }
+
+                    if (raw_emoji.empty()) {
+                        std::vector<std::string> target_msg_ids;
+                        bool is_modal = false;
+                        std::vector<std::string> msg_ids = g_db->get_message_ids_by_modal(msg.server_id, target);
+                        if (!msg_ids.empty()) {
+                            target_msg_ids = msg_ids;
+                            is_modal = true;
+                        } else {
+                            auto rr_msg = g_db->get_rr_message(target);
+                            if (rr_msg && rr_msg->server_id == msg.server_id) {
+                                target_msg_ids.push_back(target);
+                            }
+                        }
+
+                        if (target_msg_ids.empty()) {
+                            bot.send_message(msg.channel_id, "could not find active modal or message ID `" + target + "` in this server.");
                             return;
                         }
-                        if (args[1] == "^") {
-                            fluxerpp::models::MessageQuery query;
-                            query.before = msg.id;
-                            query.limit = 1;
-                            auto res = bot.rest().get_messages(msg.channel_id, query);
-                            std::string found_id = "";
-                            if (res.success()) {
-                                if (res.body.is_array() && !res.body.empty()) {
-                                    auto m = fluxerpp::models::Message::from_json(res.body[0]);
-                                    found_id = m.id;
-                                } else if (res.body.is_object() && res.body.contains("messages") && res.body["messages"].is_array() && !res.body["messages"].empty()) {
-                                    auto m = fluxerpp::models::Message::from_json(res.body["messages"][0]);
-                                    found_id = m.id;
+
+                        int removed_count = 0;
+                        for (const auto& mid : target_msg_ids) {
+                            auto details = g_db->get_rr_message(mid);
+                            if (details) {
+                                for (const auto& r : details->rules) {
+                                    bot.unreact_from_message(details->channel_id, mid, r.emoji_id, bot.current_user().id);
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                                }
+
+                                auto res = bot.rest().get_message(details->channel_id, mid);
+                                if (res.success()) {
+                                    auto m = fluxerpp::models::Message::from_json(res.body);
+                                    if (m.author == bot.current_user().id) {
+                                        fluxerpp::models::MessagePayload payload;
+                                        nlohmann::json embed = nlohmann::json::object();
+                                        embed["title"] = "reaction roles removed";
+                                        embed["colour"] = "#E74C3C";
+                                        embed["description"] = "Reaction roles have been deactivated and removed from this message.";
+                                        payload.embeds.push_back(embed);
+                                        payload.content = " ";
+                                        bot.edit_message(details->channel_id, mid, payload, [](auto, bool){});
+                                    }
                                 }
                             }
-                            if (found_id.empty()) {
-                                bot.send_message(msg.channel_id, "failed to find the message above.");
-                                return;
-                            }
-                            target = found_id;
-                            size_t arg_idx = 2;
-                            if (arg_idx < args.size() && args[arg_idx].rfind("<#", 0) == 0 && args[arg_idx].back() == '>') arg_idx++;
-                            if (arg_idx < args.size()) raw_emoji = args[arg_idx++];
-                            for (size_t i = arg_idx; i < args.size(); ++i) {
-                                if (i > arg_idx) role_query += " ";
-                                role_query += args[i];
-                            }
-                        } else {
-                            target = args[1];
-                            size_t arg_idx = 2;
-                            if (arg_idx < args.size() && args[arg_idx].rfind("<#", 0) == 0 && args[arg_idx].back() == '>') arg_idx++;
-                            if (arg_idx < args.size()) raw_emoji = args[arg_idx++];
-                            for (size_t i = arg_idx; i < args.size(); ++i) {
-                                if (i > arg_idx) role_query += " ";
-                                role_query += args[i];
+
+                            if (g_db->delete_rr_message(mid)) {
+                                removed_count++;
                             }
                         }
+
+                        if (is_modal) {
+                            bot.send_message(msg.channel_id, "successfully removed reaction roles configuration for modal **" + target + "** and all " + std::to_string(removed_count) + " active messages.");
+                        } else {
+                            bot.send_message(msg.channel_id, "successfully removed reaction roles configuration for message ID **" + target + "**.");
+                        }
+                        return;
                     }
+
                     std::string emoji = clean_emoji(raw_emoji);
 
                     auto server_opt = bot.get_server(msg.server_id);
@@ -942,7 +1041,7 @@ public:
                                     if (res.success()) {
                                         auto m = fluxerpp::models::Message::from_json(res.body);
                                         if (m.author == bot.current_user().id) {
-                                            fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr);
+                                            fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr, &bot);
                                             
                                             bot.edit_message(updated_rr->channel_id, target_msg_id, payload, [](auto, bool){});
                                         }
@@ -951,7 +1050,7 @@ public:
                             }
                         }
                     }
-                    bot.send_message(msg.channel_id, "✅ removed mapping.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " removed mapping.");
                     return;
                 }
 
@@ -979,7 +1078,7 @@ public:
                             g_db->update_rr_embed_json(target_msg_id, json_str);
                             auto updated_rr = g_db->get_rr_message(target_msg_id);
                             if (updated_rr) {
-                                fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr);
+                                fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr, &bot);
                                 bot.edit_message(updated_rr->channel_id, target_msg_id, payload);
                             }
                         }
@@ -1007,84 +1106,109 @@ public:
                     std::string old_emoji_query = args[2];
                     bool updated = false;
 
-                    if (args.size() == 5) {
-                        std::string edit_type = args[3];
-                        std::string edit_value = args[4];
-                        if (edit_type == "role") {
-                            std::vector<EmojiRolePair> parsed = parse_emoji_role_pairs(old_emoji_query + " " + edit_value, bot, msg.server_id);
-                            if (parsed.empty()) {
-                                bot.send_message(msg.channel_id, "failed to parse/resolve the new role.");
-                                return;
+                    std::string edit_type = "";
+                    std::string edit_value = "";
+                    std::string new_emoji = "";
+                    std::string old_role_id = "";
+                    std::string new_role_query = "";
+
+                    bool is_role_edit = false;
+                    bool is_emoji_edit = false;
+                    bool is_four_arg_edit = false;
+
+                    if (args.size() >= 5 && args[3] == "role") {
+                        is_role_edit = true;
+                        edit_type = "role";
+                        edit_value = args[4];
+                        for (size_t i = 5; i < args.size(); ++i) edit_value += " " + args[i];
+                    }
+                    else if (args.size() >= 5 && args[3] == "emoji") {
+                        is_emoji_edit = true;
+                        edit_type = "emoji";
+                        edit_value = args[4];
+                    }
+                    else if (args.size() >= 6) {
+                        is_four_arg_edit = true;
+                        new_emoji = args[3];
+                        // Let's parse old_role and new_role from the remaining arguments
+                        std::string joined_roles = args[4];
+                        for (size_t i = 5; i < args.size(); ++i) joined_roles += " " + args[i];
+
+                        // Find the old rule in the database to identify old_role_id and new_role_query
+                        auto ref_msg = g_db->get_rr_message(msg_ids[0]);
+                        if (ref_msg) {
+                            std::vector<bronx::Database::RRRule> matching_rules;
+                            for (const auto& r : ref_msg->rules) {
+                                if (r.emoji_id == old_emoji_query) {
+                                    matching_rules.push_back(r);
+                                }
                             }
-                            std::string rid = parsed[0].role_id;
-                            fluxerpp::models::Role selected_role;
-                            bool found = false;
-                            for (const auto& r : server_opt->roles) {
-                                if (r.id == rid) { selected_role = r; found = true; break; }
+
+                            if (matching_rules.size() == 1) {
+                                old_role_id = matching_rules[0].role_id;
+                                new_role_query = joined_roles;
                             }
-                            if (found) {
-                                // Hierarchy check
-                                bool is_owner_or_bypass = (server_opt->owner == msg.author.id) || bot.is_owner(msg.author.id);
-                                if (!is_owner_or_bypass) {
-                                    int member_rank = server_opt->get_highest_rank(member);
-                                    if (selected_role.rank <= member_rank) {
-                                        bot.send_message(msg.channel_id, "permission error: you cannot configure the role **" + selected_role.name + "** because it is at or above your highest role in the server hierarchy.");
-                                        return;
+                            else if (matching_rules.size() > 1) {
+                                for (const auto& r : matching_rules) {
+                                    std::string role_name = r.role_id;
+                                    for (const auto& sr : server_opt->roles) {
+                                        if (sr.id == r.role_id) { role_name = sr.name; break; }
+                                    }
+
+                                    std::string lower_joined = joined_roles;
+                                    std::transform(lower_joined.begin(), lower_joined.end(), lower_joined.begin(), ::tolower);
+                                    std::string lower_name = role_name;
+                                    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+                                    std::string lower_rid = r.role_id;
+                                    std::transform(lower_rid.begin(), lower_rid.end(), lower_rid.begin(), ::tolower);
+
+                                    if (lower_joined.rfind(lower_name, 0) == 0) {
+                                        old_role_id = r.role_id;
+                                        new_role_query = joined_roles.substr(role_name.size());
+                                        new_role_query.erase(0, new_role_query.find_first_not_of(" -➔>"));
+                                        break;
+                                    }
+                                    else if (lower_joined.rfind(lower_rid, 0) == 0) {
+                                        old_role_id = r.role_id;
+                                        new_role_query = joined_roles.substr(r.role_id.size());
+                                        new_role_query.erase(0, new_role_query.find_first_not_of(" -➔>"));
+                                        break;
                                     }
                                 }
-                                // Dangerous check
-                                if (is_role_dangerous(selected_role)) {
-                                    fluxerpp::models::MessagePayload payload;
-                                    nlohmann::json embed = nlohmann::json::object();
-                                    embed["title"] = "⚠️ Warning: Dangerous Role Permissions";
-                                    embed["colour"] = "#F1C40F";
-                                    embed["description"] = "The role **" + selected_role.name + "** contains administrative or moderator permissions.\n"
-                                                          "Are you sure you want to map this role? Anyone will be able to get these permissions by reacting!\n\n"
-                                                          "Type **yes** to confirm and activate, or **no** to cancel.";
-                                    payload.embeds.push_back(embed);
-
-                                    bot.send_message(msg.channel_id, payload, [&bot, msg, msg_ids, old_emoji_query, rid](fluxerpp::models::Message prompt, bool ok) {
-                                        if (!ok) return;
-                                        bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(30), [&bot, msg, prompt, msg_ids, old_emoji_query, rid](std::optional<fluxerpp::events::Message> reply) {
-                                            bot.delete_message(prompt.channel, prompt.id);
-                                            if (reply) bot.delete_message(reply->channel_id, reply->id);
-
-                                            if (reply && (reply->content == "yes" || reply->content == "YES" || reply->content == "confirm")) {
-                                                for (const auto& target_msg_id : msg_ids) {
-                                                    g_db->remove_rr_rule(target_msg_id, old_emoji_query);
-                                                    g_db->add_rr_rule(target_msg_id, old_emoji_query, rid);
-                                                    auto updated_rr = g_db->get_rr_message(target_msg_id);
-                                                    if (updated_rr) {
-                                                        fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr);
-                                                        bot.edit_message(updated_rr->channel_id, target_msg_id, payload);
-                                                    }
-                                                }
-                                                bot.send_reply(msg, "successfully edited role mapping for all instances.", true);
-                                            } else {
-                                                bot.send_reply(msg, "cancelled editing dangerous role.", true);
-                                            }
-                                        });
-                                    });
-                                    return;
-                                }
                             }
                         }
-                    } else if (args.size() >= 6) {
-                        std::string new_emoji = args[3];
-                        std::string old_role_q = args[4];
-                        std::string new_role_q = args[5];
-                        std::vector<EmojiRolePair> old_parsed = parse_emoji_role_pairs(old_emoji_query + " " + old_role_q, bot, msg.server_id);
-                        std::vector<EmojiRolePair> new_parsed = parse_emoji_role_pairs(new_emoji + " " + new_role_q, bot, msg.server_id);
-                        if (old_parsed.empty() || new_parsed.empty()) {
-                            bot.send_message(msg.channel_id, "failed to parse/resolve the roles.");
+                    }
+
+                    // Let's resolve the new role for checks
+                    std::string new_role_id = "";
+                    if (is_role_edit) {
+                        std::vector<EmojiRolePair> parsed = parse_emoji_role_pairs(old_emoji_query + " " + edit_value, bot, msg.server_id);
+                        if (!parsed.empty()) {
+                            new_role_id = parsed[0].role_id;
+                        } else {
+                            bot.send_message(msg.channel_id, "failed to parse/resolve the new role.");
                             return;
                         }
-                        
-                        std::string rid = new_parsed[0].role_id;
+                    }
+                    else if (is_four_arg_edit) {
+                        if (old_role_id.empty()) {
+                            bot.send_message(msg.channel_id, "failed to identify the old role mapping to update.");
+                            return;
+                        }
+                        std::vector<EmojiRolePair> new_parsed = parse_emoji_role_pairs(new_emoji + " " + new_role_query, bot, msg.server_id);
+                        if (!new_parsed.empty()) {
+                            new_role_id = new_parsed[0].role_id;
+                        } else {
+                            bot.send_message(msg.channel_id, "failed to parse/resolve the new role.");
+                            return;
+                        }
+                    }
+
+                    if (!new_role_id.empty()) {
                         fluxerpp::models::Role selected_role;
                         bool found = false;
                         for (const auto& r : server_opt->roles) {
-                            if (r.id == rid) { selected_role = r; found = true; break; }
+                            if (r.id == new_role_id) { selected_role = r; found = true; break; }
                         }
                         if (found) {
                             // Hierarchy check
@@ -1096,21 +1220,20 @@ public:
                                     return;
                                 }
                             }
-                            
                             // Dangerous check
                             if (is_role_dangerous(selected_role)) {
                                 fluxerpp::models::MessagePayload payload;
                                 nlohmann::json embed = nlohmann::json::object();
-                                embed["title"] = "⚠️ Warning: Dangerous Role Permissions";
+                                embed["title"] = "" + bronx::emj_warning + " Warning: Dangerous Role Permissions";
                                 embed["colour"] = "#F1C40F";
                                 embed["description"] = "The role **" + selected_role.name + "** contains administrative or moderator permissions.\n"
                                                       "Are you sure you want to map this role? Anyone will be able to get these permissions by reacting!\n\n"
                                                       "Type **yes** to confirm and activate, or **no** to cancel.";
                                 payload.embeds.push_back(embed);
 
-                                bot.send_message(msg.channel_id, payload, [&bot, msg, msg_ids, old_parsed, new_parsed](fluxerpp::models::Message prompt, bool ok) {
+                                bot.send_message(msg.channel_id, payload, [&bot, msg, msg_ids, is_role_edit, is_four_arg_edit, old_emoji_query, new_emoji, old_role_id, new_role_id](fluxerpp::models::Message prompt, bool ok) {
                                     if (!ok) return;
-                                    bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(30), [&bot, msg, prompt, msg_ids, old_parsed, new_parsed](std::optional<fluxerpp::events::Message> reply) {
+                                    bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(30), [&bot, msg, prompt, msg_ids, is_role_edit, is_four_arg_edit, old_emoji_query, new_emoji, old_role_id, new_role_id](std::optional<fluxerpp::events::Message> reply) {
                                         bot.delete_message(prompt.channel, prompt.id);
                                         if (reply) bot.delete_message(reply->channel_id, reply->id);
 
@@ -1118,30 +1241,35 @@ public:
                                             for (const auto& target_msg_id : msg_ids) {
                                                 auto rr_msg_opt = g_db->get_rr_message(target_msg_id);
                                                 if (!rr_msg_opt) continue;
-                                                
-                                                g_db->remove_rr_rule(target_msg_id, old_parsed[0].emoji, old_parsed[0].role_id);
-                                                g_db->add_rr_rule(target_msg_id, new_parsed[0].emoji, new_parsed[0].role_id);
 
-                                                auto updated_rr_temp = g_db->get_rr_message(target_msg_id);
-                                                if (updated_rr_temp) {
-                                                    bool still_has_old_emoji = false;
-                                                    for (const auto& r : updated_rr_temp->rules) {
-                                                        if (r.emoji_id == old_parsed[0].emoji) {
-                                                            still_has_old_emoji = true;
-                                                            break;
+                                                if (is_role_edit) {
+                                                    g_db->remove_rr_rule(target_msg_id, old_emoji_query);
+                                                    g_db->add_rr_rule(target_msg_id, old_emoji_query, new_role_id);
+                                                }
+                                                else if (is_four_arg_edit) {
+                                                    g_db->remove_rr_rule(target_msg_id, old_emoji_query, old_role_id);
+                                                    g_db->add_rr_rule(target_msg_id, new_emoji, new_role_id);
+
+                                                    auto updated_rr_temp = g_db->get_rr_message(target_msg_id);
+                                                    if (updated_rr_temp) {
+                                                        bool still_has_old_emoji = false;
+                                                        for (const auto& r : updated_rr_temp->rules) {
+                                                            if (r.emoji_id == old_emoji_query) {
+                                                                still_has_old_emoji = true;
+                                                                break;
+                                                            }
+                                                        }
+                                                        if (!still_has_old_emoji) {
+                                                            bot.unreact_from_message(rr_msg_opt->channel_id, target_msg_id, old_emoji_query, bot.current_user().id);
+                                                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
                                                         }
                                                     }
-                                                    if (!still_has_old_emoji) {
-                                                        bot.unreact_from_message(rr_msg_opt->channel_id, target_msg_id, old_parsed[0].emoji, bot.current_user().id);
-                                                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                                                    }
+                                                    bot.react_to_message(rr_msg_opt->channel_id, target_msg_id, new_emoji);
                                                 }
-                                                
-                                                bot.react_to_message(rr_msg_opt->channel_id, target_msg_id, new_parsed[0].emoji);
-                                                
+
                                                 auto updated_rr = g_db->get_rr_message(target_msg_id);
                                                 if (updated_rr) {
-                                                    fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr);
+                                                    fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr, &bot);
                                                     bot.edit_message(updated_rr->channel_id, target_msg_id, payload);
                                                 }
                                             }
@@ -1160,74 +1288,57 @@ public:
                         auto rr_msg_opt = g_db->get_rr_message(target_msg_id);
                         if (!rr_msg_opt) continue;
 
-                        if (args.size() == 5) {
-                            std::string edit_type = args[3];
-                            std::string edit_value = args[4];
-
-                            if (edit_type == "emoji") {
-                                std::string matched_role_id = "";
-                                for (const auto& r : rr_msg_opt->rules) {
-                                    if (r.emoji_id == old_emoji_query) {
-                                        matched_role_id = r.role_id;
-                                        break;
-                                    }
-                                }
-
-                                if (matched_role_id.empty()) continue;
-
-                                g_db->remove_rr_rule(target_msg_id, old_emoji_query);
-                                g_db->add_rr_rule(target_msg_id, edit_value, matched_role_id);
-                                
-                                bot.unreact_from_message(rr_msg_opt->channel_id, target_msg_id, old_emoji_query, bot.current_user().id);
-                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                                bot.react_to_message(rr_msg_opt->channel_id, target_msg_id, edit_value);
-                                updated = true;
-                            } 
-                            else if (edit_type == "role") {
-                                std::vector<EmojiRolePair> parsed = parse_emoji_role_pairs(old_emoji_query + " " + edit_value, bot, msg.server_id);
-                                if (parsed.empty()) continue;
-
-                                g_db->remove_rr_rule(target_msg_id, old_emoji_query);
-                                g_db->add_rr_rule(target_msg_id, old_emoji_query, parsed[0].role_id);
-                                updated = true;
-                            }
+                        if (is_role_edit) {
+                            g_db->remove_rr_rule(target_msg_id, old_emoji_query);
+                            g_db->add_rr_rule(target_msg_id, old_emoji_query, new_role_id);
+                            updated = true;
                         }
-                        else if (args.size() >= 6) {
-                            std::string new_emoji = args[3];
-                            std::string old_role_q = args[4];
-                            std::string new_role_q = args[5];
+                        else if (is_emoji_edit) {
+                            std::string matched_role_id = "";
+                            for (const auto& r : rr_msg_opt->rules) {
+                                if (r.emoji_id == old_emoji_query) {
+                                    matched_role_id = r.role_id;
+                                    break;
+                                }
+                            }
 
-                            std::vector<EmojiRolePair> old_parsed = parse_emoji_role_pairs(old_emoji_query + " " + old_role_q, bot, msg.server_id);
-                            std::vector<EmojiRolePair> new_parsed = parse_emoji_role_pairs(new_emoji + " " + new_role_q, bot, msg.server_id);
+                            if (matched_role_id.empty()) continue;
 
-                            if (old_parsed.empty() || new_parsed.empty()) continue;
-
-                            g_db->remove_rr_rule(target_msg_id, old_parsed[0].emoji, old_parsed[0].role_id);
-                            g_db->add_rr_rule(target_msg_id, new_parsed[0].emoji, new_parsed[0].role_id);
+                            g_db->remove_rr_rule(target_msg_id, old_emoji_query);
+                            g_db->add_rr_rule(target_msg_id, edit_value, matched_role_id);
+                            
+                            bot.unreact_from_message(rr_msg_opt->channel_id, target_msg_id, old_emoji_query, bot.current_user().id);
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            bot.react_to_message(rr_msg_opt->channel_id, target_msg_id, edit_value);
+                            updated = true;
+                        }
+                        else if (is_four_arg_edit) {
+                            g_db->remove_rr_rule(target_msg_id, old_emoji_query, old_role_id);
+                            g_db->add_rr_rule(target_msg_id, new_emoji, new_role_id);
 
                             auto updated_rr_temp = g_db->get_rr_message(target_msg_id);
                             if (updated_rr_temp) {
                                 bool still_has_old_emoji = false;
                                 for (const auto& r : updated_rr_temp->rules) {
-                                    if (r.emoji_id == old_parsed[0].emoji) {
+                                    if (r.emoji_id == old_emoji_query) {
                                         still_has_old_emoji = true;
                                         break;
                                     }
                                 }
                                 if (!still_has_old_emoji) {
-                                    bot.unreact_from_message(rr_msg_opt->channel_id, target_msg_id, old_parsed[0].emoji, bot.current_user().id);
+                                    bot.unreact_from_message(rr_msg_opt->channel_id, target_msg_id, old_emoji_query, bot.current_user().id);
                                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                                 }
                             }
                             
-                            bot.react_to_message(rr_msg_opt->channel_id, target_msg_id, new_parsed[0].emoji);
+                            bot.react_to_message(rr_msg_opt->channel_id, target_msg_id, new_emoji);
                             updated = true;
                         }
 
                         if (updated) {
                             auto updated_rr = g_db->get_rr_message(target_msg_id);
                             if (updated_rr) {
-                                fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr);
+                                fluxerpp::models::MessagePayload payload = build_rr_payload(*updated_rr, &bot);
 
                                 bot.edit_message(updated_rr->channel_id, target_msg_id, payload);
                             }
@@ -1456,7 +1567,7 @@ public:
                                 }
                             }
                             if (!blocked_role_names.empty()) {
-                                std::string blocked_msg = "⚠️ permission warning: skipped the following roles because they are at or above your highest role in the server hierarchy: ";
+                                std::string blocked_msg = "" + bronx::emj_warning + " permission warning: skipped the following roles because they are at or above your highest role in the server hierarchy: ";
                                 for (size_t i = 0; i < blocked_role_names.size(); ++i) {
                                     blocked_msg += "**" + blocked_role_names[i] + "**" + (i + 1 < blocked_role_names.size() ? ", " : "");
                                 }
@@ -1483,10 +1594,10 @@ public:
                             if (existing_rr && !existing_rr->rules.empty()) {
                                 reply_msg += "\n\n⚙️ **Note**: This message already has reaction roles configured in my database:\n";
                                 for (const auto& r : existing_rr->rules) {
-                                    reply_msg += display_emoji(r.emoji_id) + " ➔ <@&" + r.role_id + ">\n";
+                                    reply_msg += display_emoji(r.emoji_id) + " ➔ <%" + r.role_id + ">\n";
                                 }
                             } else if (!physical_reactions.empty()) {
-                                reply_msg += "\n\n⚠️ **Note**: This message has the following existing reactions on it:\n";
+                                reply_msg += "\n\n" + bronx::emj_warning + " **Note**: This message has the following existing reactions on it:\n";
                                 for (const auto& r : physical_reactions) {
                                     reply_msg += display_emoji(r) + " ";
                                 }
@@ -1531,11 +1642,12 @@ public:
                         if (!parse_modal_name.empty()) {
                             // Build the modal message payload
                             bronx::Database::RRMessage tmp_rr;
+                            tmp_rr.server_id = msg.server_id;
                             tmp_rr.modal_name = parse_modal_name;
                             for (const auto& r : rules) {
                                 tmp_rr.rules.push_back({r.emoji, r.role_id});
                             }
-                            fluxerpp::models::MessagePayload modal_payload = build_rr_payload(tmp_rr);
+                            fluxerpp::models::MessagePayload modal_payload = build_rr_payload(tmp_rr, &bot);
 
                             bot.send_message(msg.channel_id, modal_payload, [parse_modal_name, rules, msg, &bot](fluxerpp::models::Message res, bool ok) {
                                 if (!ok) {
@@ -1547,7 +1659,7 @@ public:
                                     g_db->add_rr_rule(res.id, r.emoji, r.role_id);
                                 }
                                 std::string pfx = msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
-                                bot.send_message(msg.channel_id, "✅ created modal **" + parse_modal_name + "** with " +
+                                bot.send_message(msg.channel_id, "" + bronx::emj_yes + " created modal **" + parse_modal_name + "** with " +
                                     std::to_string(rules.size()) + " rule" + (rules.size() == 1 ? "" : "s") + ". "
                                     "use `" + pfx + "rr send " + parse_modal_name + " #channel` to deploy it.");
                             });
@@ -1583,14 +1695,14 @@ public:
                         desc += format_rr_description(converted_rules);
 
                         if (!dangerous_roles.empty()) {
-                            desc += "\n\n⚠️ **WARNING: The following roles have dangerous administrative/moderator permissions (e.g. Manage Roles, Ban, Kick):**\n";
+                            desc += "\n\n" + bronx::emj_warning + " **WARNING: The following roles have dangerous administrative/moderator permissions (e.g. Manage Roles, Ban, Kick):**\n";
                             for (const auto& dr : dangerous_roles) {
                                 desc += "• **" + dr + "**\n";
                             }
                             desc += "\n*Reacting to confirm will allow anyone to obtain these dangerous permissions!*";
                         }
 
-                        desc += "\n\nreact with ✅ below to confirm and activate, or ❌ to cancel.";
+                        desc += "\n\nreact with " + bronx::emj_yes + " below to confirm and activate, or " + bronx::emj_no + " to cancel.";
                         embed["description"] = desc;
                         confirm_payload.embeds.push_back(embed);
 
@@ -1606,9 +1718,9 @@ public:
                                     scan.author_id = msg.author.id;
                                     g_pending_scans[confirm_res.id] = scan;
                                 }
-                                bot.react_to_message(confirm_res.channel, confirm_res.id, "✅");
+                                bot.react_to_message(confirm_res.channel, confirm_res.id, "" + bronx::emj_yes + "");
                                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                                bot.react_to_message(confirm_res.channel, confirm_res.id, "❌");
+                                bot.react_to_message(confirm_res.channel, confirm_res.id, "" + bronx::emj_no + "");
                             }
                         });
                     }).detach();
@@ -1718,33 +1830,64 @@ public:
                     }
 
                     lock.unlock();
-                    if (e.emoji_id == "✅") {
+                    if (e.emoji_id == "" + bronx::emj_yes + "") {
                         // Confirm: save rules in database
+                        auto old_msg = g_db->get_rr_message(scan.target_message_id);
+                        if (old_msg) {
+                            for (const auto& old_rule : old_msg->rules) {
+                                bool still_present = false;
+                                for (const auto& new_rule : scan.rules) {
+                                    if (new_rule.emoji == old_rule.emoji_id) {
+                                        still_present = true;
+                                        break;
+                                    }
+                                }
+                                if (!still_present) {
+                                    bot.unreact_from_message(scan.target_channel_id, scan.target_message_id, old_rule.emoji_id, bot.current_user().id);
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                                }
+                            }
+                        }
+
                         g_db->add_rr_message(scan.target_message_id, scan.target_channel_id, scan.target_server_id, "");
+                        g_db->clear_rr_rules(scan.target_message_id);
+
                         for (const auto& r : scan.rules) {
                             g_db->add_rr_rule(scan.target_message_id, r.emoji, r.role_id);
                             bot.react_to_message(scan.target_channel_id, scan.target_message_id, r.emoji);
                             std::this_thread::sleep_for(std::chrono::milliseconds(100));
                         }
 
+                        auto updated_rr = g_db->get_rr_message(scan.target_message_id);
+                        if (updated_rr && !updated_rr->modal_name.empty()) {
+                            auto res = bot.rest().get_message(updated_rr->channel_id, scan.target_message_id);
+                            if (res.success()) {
+                                auto m = fluxerpp::models::Message::from_json(res.body);
+                                if (m.author == bot.current_user().id) {
+                                    fluxerpp::models::MessagePayload target_payload = build_rr_payload(*updated_rr, &bot);
+                                    bot.edit_message(updated_rr->channel_id, scan.target_message_id, target_payload);
+                                }
+                            }
+                        }
+
                         fluxerpp::models::MessagePayload payload;
                         nlohmann::json embed = nlohmann::json::object();
                         embed["title"] = "reaction roles scanner";
                         embed["colour"] = "#2ECC71";
-                        embed["description"] = "✅ configuration successfully confirmed! mappings activated on target message `" + scan.target_message_id + "`.";
+                        embed["description"] = "" + bronx::emj_yes + " configuration successfully confirmed! mappings activated on target message `" + scan.target_message_id + "`.";
                         payload.embeds.push_back(embed);
                         payload.content = " ";
                         bot.edit_message(e.channel_id, e.id, payload, [&bot, e](auto, bool) {
                             bot.delete_message(e.channel_id, e.id); // clean up prompt
                         });
                     } 
-                    else if (e.emoji_id == "❌") {
+                    else if (e.emoji_id == "" + bronx::emj_no + "") {
                         // Cancel
                         fluxerpp::models::MessagePayload payload;
                         nlohmann::json embed = nlohmann::json::object();
                         embed["title"] = "reaction roles scanner";
                         embed["colour"] = "#E74C3C";
-                        embed["description"] = "❌ configuration cancelled.";
+                        embed["description"] = "" + bronx::emj_no + " configuration cancelled.";
                         payload.embeds.push_back(embed);
                         payload.content = " ";
                         bot.edit_message(e.channel_id, e.id, payload, [&bot, e](auto, bool) {
@@ -1787,7 +1930,7 @@ public:
                             std::cout << "[bronx rr] role remove " << (success ? "succeeded" : "failed") 
                                       << " for user " << e.user_id << " (role: " << rule.role_id << ") error: " << err << "\n";
                             if (!success) {
-                                bot.send_message(e.channel_id, "⚠️ failed to remove role **" + role_name + "**. make sure i have the **Manage Roles** permission and my role is positioned above it.");
+                                bot.send_message(e.channel_id, "" + bronx::emj_warning + " failed to remove role **" + role_name + "**. make sure i have the **Manage Roles** permission and my role is positioned above it.");
                             }
                         });
                     } else {
@@ -1797,9 +1940,9 @@ public:
                                       << " for user " << e.user_id << " (role: " << rule.role_id << ") error: " << err << "\n";
                             if (!success) {
                                 if (err == "NotElevated" || err == "HierarchyError") {
-                                    bot.send_message(e.channel_id, "⚠️ hierarchy error: i couldn't give you the **" + role_name + "** role in `" + (server_opt ? server_opt->name : "server") + "`. my role needs to be placed *above* the roles I am giving out. please contact an admin.");
+                                    bot.send_message(e.channel_id, "" + bronx::emj_warning + " hierarchy error: i couldn't give you the **" + role_name + "** role in `" + (server_opt ? server_opt->name : "server") + "`. my role needs to be placed *above* the roles I am giving out. please contact an admin.");
                                 } else {
-                                    bot.send_message(e.channel_id, "⚠️ failed to assign role **" + role_name + "**. make sure i have the **Manage Roles** permission and my role is positioned above it in the server settings.");
+                                    bot.send_message(e.channel_id, "" + bronx::emj_warning + " failed to assign role **" + role_name + "**. make sure i have the **Manage Roles** permission and my role is positioned above it in the server settings.");
                                 }
                             }
                         });
@@ -1848,7 +1991,7 @@ public:
                             std::cout << "[bronx rr] role add " << (success ? "succeeded" : "failed") 
                                       << " for user " << e.user_id << " (role: " << rule.role_id << ") error: " << err << "\n";
                             if (!success) {
-                                bot.send_message(e.channel_id, "⚠️ failed to assign role **" + role_name + "**. make sure i have the **Manage Roles** permission and my role is positioned above it.");
+                                bot.send_message(e.channel_id, "" + bronx::emj_warning + " failed to assign role **" + role_name + "**. make sure i have the **Manage Roles** permission and my role is positioned above it.");
                             }
                         });
                     } else {
@@ -1859,9 +2002,9 @@ public:
                                       << " for user " << e.user_id << " (role: " << rule.role_id << ") error: " << err << "\n";
                             if (!success) {
                                 if (err == "NotElevated" || err == "HierarchyError") {
-                                    bot.send_message(e.channel_id, "⚠️ hierarchy error: i couldn't remove the **" + role_name + "** role from you in `" + (server_opt ? server_opt->name : "server") + "`. my role needs to be placed *above* the roles I am giving out. please contact an admin.");
+                                    bot.send_message(e.channel_id, "" + bronx::emj_warning + " hierarchy error: i couldn't remove the **" + role_name + "** role from you in `" + (server_opt ? server_opt->name : "server") + "`. my role needs to be placed *above* the roles I am giving out. please contact an admin.");
                                 } else {
-                                    bot.send_message(e.channel_id, "⚠️ failed to remove role **" + role_name + "**. make sure i have the **Manage Roles** permission and my role is positioned above it in the server settings.");
+                                    bot.send_message(e.channel_id, "" + bronx::emj_warning + " failed to remove role **" + role_name + "**. make sure i have the **Manage Roles** permission and my role is positioned above it in the server settings.");
                                 }
                             }
                         });

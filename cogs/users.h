@@ -9,7 +9,7 @@ public:
     void register_handlers(fluxerpp::cluster& bot) override {
         bot.register_command({
             "userinfo",
-            {"user", "profile", "ui"},
+            {"user", "profile", "ui", "whois"},
             "fetch information about a user.",
             "",
             {"[user]"},
@@ -34,6 +34,14 @@ public:
                     uint64_t account_created_ms = fluxerpp::utils::decode_ulid_timestamp(user.id);
                     std::string stoat_join = helpers::format_epoch_ms(account_created_ms);
                     
+                    std::string server_name = "server";
+                    if (!msg.server_id.empty()) {
+                        auto srv = bot.get_server(msg.server_id);
+                        if (srv) {
+                            server_name = srv->name;
+                        }
+                    }
+
                     std::string server_join = "none";
                     if (!member.joined_at.empty()) {
                         server_join = helpers::format_iso_string(member.joined_at);
@@ -41,20 +49,29 @@ public:
                     
                     std::string discrim = user.discriminator.empty() ? "" : "#" + user.discriminator;
 
+                    // Use a short custom bio for the bot itself to avoid
+                    // blowing past Stoat's 2000-char embed description limit.
+                    std::string bio_text;
+                    if (user.id == bot.current_user().id) {
+                        bio_text = "stoat's premier all-in-one bot — moderation, roles, levels, economy, logging, and 150+ more commands. [learn more](https://bronx.siqnole.dev/)";
+                    } else {
+                        bio_text = user.bio.value_or("none");
+                    }
+
                     std::string desc = "• **id**: `" + user.id + "`\n";
                     desc += "• **display name**: " + user.display_name.value_or("none") + "\n";
                     desc += "• **type**: " + std::string(user.bot ? "bot" : "user") + "\n";
                     desc += "• **status**: " + status_full + "\n";
-                    desc += "• **bio**: " + user.bio.value_or("none") + "\n\n";
+                    desc += "• **bio**: " + bio_text + "\n\n";
                     desc += "• **joined stoat**: " + stoat_join + "\n";
-                    desc += "• **joined stoat++**: " + server_join + "\n";
+                    desc += "• **joined " + server_name + "**: " + server_join + "\n";
                     
                     fluxerpp::models::Embed embed;
                     embed.title       = user.username + discrim + (user.bot ? " [bot]" : "");
                     embed.description = desc;
                     embed.colour      = "#5865f2";
                     embed.icon_url    = user.avatar_url(bot.config().cdn_url);
-                    // upload banner (or avatar fallback) to Autumn for the embed image
+                    // upload banner (or avatar fallback) to Fluxer CDN for the embed image
                     std::string img_src = user.banner
                         ? user.banner_url(bot.config().cdn_url)
                         : user.avatar_url(bot.config().cdn_url);
@@ -70,7 +87,7 @@ public:
 
         bot.register_command({
             "avatar",
-            {"av"},
+            {"av", "pfp"},
             "fetch the avatar of a user.",
             "",
             {"[user]"},
@@ -94,7 +111,7 @@ public:
                     embed.title  = user.username + "'s avatar";
                     embed.url    = av_url;
                     embed.colour = "#5865f2";
-                    // upload avatar to Autumn to get a file ID for the media field
+                    // upload avatar to Fluxer CDN to get a file ID for the media field
                     std::string file_id = bot.rest().upload_from_url(av_url);
                     if (!file_id.empty()) embed.set_image(file_id);
                     
@@ -142,6 +159,166 @@ public:
                     payload.embeds.push_back(embed.to_json());
                     bot.send_message(msg.channel_id, payload);
                 });
+            },
+            "Users"
+        });
+
+        bot.register_command({
+            "serverinfo",
+            {"sinfo", "server"},
+            "fetch information about the server.",
+            "",
+            {"[server_id]"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling serverinfo...\n";
+                std::string target_server_id = msg.server_id;
+                if (!args.empty() && args[0].size() == 26) {
+                    target_server_id = args[0];
+                }
+
+                if (target_server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used in a server");
+                    return;
+                }
+
+                auto srv_opt = bot.get_server(target_server_id);
+                if (!srv_opt) {
+                    bot.send_message(msg.channel_id, "could not find server `" + target_server_id + "`");
+                    return;
+                }
+
+                auto srv = *srv_opt;
+                std::thread([&bot, msg, srv]() {
+                    int member_count = 0;
+                    auto res = bot.rest().get_server_members(srv.id);
+                    if (res.success()) {
+                        if (res.body.is_array()) {
+                            member_count = res.body.size();
+                        } else if (res.body.contains("members") && res.body["members"].is_array()) {
+                            member_count = res.body["members"].size();
+                        }
+                    }
+
+                    uint64_t created_ms = fluxerpp::utils::decode_ulid_timestamp(srv.id);
+                    std::string created_str = helpers::format_epoch_ms(created_ms);
+
+                    std::string owner_str = srv.owner;
+                    auto owner_user = bot.get_user(srv.owner);
+                    if (owner_user) {
+                        owner_str = "@" + owner_user->username + " (`" + srv.owner + "`)";
+                    } else {
+                        owner_str = "<@" + srv.owner + ">";
+                    }
+
+                    std::string desc = "• **id**: `" + srv.id + "`\n";
+                    desc += "• **owner**: " + owner_str + "\n";
+                    desc += "• **created**: " + created_str + "\n";
+                    if (member_count > 0) {
+                        desc += "• **members**: " + std::to_string(member_count) + "\n";
+                    }
+                    desc += "• **channels**: " + std::to_string(srv.channels.size()) + "\n";
+                    desc += "• **roles**: " + std::to_string(srv.roles.size()) + "\n";
+                    if (srv.description && !srv.description.value().empty()) {
+                        desc += "• **description**: " + srv.description.value() + "\n";
+                    }
+
+                    fluxerpp::models::Embed embed;
+                    embed.title = srv.name;
+                    embed.description = desc;
+                    embed.colour = "#5865f2";
+
+                    std::string icon_url = "";
+                    if (srv.icon) {
+                        icon_url = srv.icon_url(bot.config().cdn_url);
+                        embed.icon_url = icon_url;
+                    }
+
+                    std::string banner_url = "";
+                    if (srv.banner) {
+                        banner_url = srv.banner_url(bot.config().cdn_url);
+                    }
+
+                    std::string upload_src = !banner_url.empty() ? banner_url : icon_url;
+                    if (!upload_src.empty()) {
+                        std::string file_id = bot.rest().upload_from_url(upload_src);
+                        if (!file_id.empty()) {
+                            embed.set_image(file_id);
+                        }
+                    }
+
+                    fluxerpp::models::MessagePayload payload;
+                    payload.content = "server info for **" + srv.name + "**:";
+                    payload.embeds.push_back(embed.to_json());
+                    bot.send_message(msg.channel_id, payload);
+                }).detach();
+            },
+            "Users"
+        });
+
+        bot.register_command({
+            "servericon",
+            {"sicon", "icon"},
+            "fetch the server's icon.",
+            "",
+            {},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling servericon...\n";
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used in a server");
+                    return;
+                }
+                auto srv = bot.get_server(msg.server_id);
+                if (!srv || !srv->icon) {
+                    bot.send_message(msg.channel_id, "this server does not have an icon set");
+                    return;
+                }
+                std::string icon_url = srv->icon_url(bot.config().cdn_url);
+                fluxerpp::models::MessagePayload payload;
+                payload.content = "icon for **" + srv->name + "**:";
+                fluxerpp::models::Embed embed;
+                embed.title = srv->name + "'s icon";
+                embed.url = icon_url;
+                embed.colour = "#5865f2";
+                std::thread([&bot, msg, payload, embed, icon_url]() mutable {
+                    std::string file_id = bot.rest().upload_from_url(icon_url);
+                    if (!file_id.empty()) embed.set_image(file_id);
+                    payload.embeds.push_back(embed.to_json());
+                    bot.send_message(msg.channel_id, payload);
+                }).detach();
+            },
+            "Users"
+        });
+
+        bot.register_command({
+            "serverbanner",
+            {"sbanner"},
+            "fetch the server's banner.",
+            "",
+            {},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling serverbanner...\n";
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used in a server");
+                    return;
+                }
+                auto srv = bot.get_server(msg.server_id);
+                if (!srv || !srv->banner) {
+                    bot.send_message(msg.channel_id, "this server does not have a banner set");
+                    return;
+                }
+                std::string banner_url = srv->banner_url(bot.config().cdn_url);
+                fluxerpp::models::MessagePayload payload;
+                payload.content = "banner for **" + srv->name + "**:";
+                fluxerpp::models::Embed embed;
+                embed.title = srv->name + "'s banner";
+                embed.url = banner_url;
+                embed.colour = "#5865f2";
+                std::thread([&bot, msg, payload, embed, banner_url]() mutable {
+                    std::string file_id = bot.rest().upload_from_url(banner_url);
+                    if (!file_id.empty()) embed.set_image(file_id);
+                    payload.embeds.push_back(embed.to_json());
+                    bot.send_message(msg.channel_id, payload);
+                }).detach();
             },
             "Users"
         });

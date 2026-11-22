@@ -16,7 +16,7 @@ private:
             if (res.success()) {
                 bot.send_message(cmd_channel, success_msg);
             } else {
-                std::string err_msg = "⚠️ " + error_prefix;
+                std::string err_msg = "" + bronx::emj_warning + " " + error_prefix;
                 if (res.status_code == 403 || res.status_code == 404) {
                     err_msg += "\n*Details: Make sure the bot is in that channel and has View Channel and Send Messages permissions (HTTP " + std::to_string(res.status_code) + ").*";
                 } else if (res.body.is_object() && res.body.contains("error") && res.body["error"].is_string()) {
@@ -141,23 +141,23 @@ public:
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 std::cout << "[bronx command] handling welcome...\n";
                 if (msg.server_id.empty()) {
-                    bot.send_message(msg.channel_id, "⚠️ This command can only be used in a server channel.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " This command can only be used in a server channel.");
                     return;
                 }
 
                 if (!g_db) {
-                    bot.send_message(msg.channel_id, "⚠️ Database is unavailable.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Database is unavailable.");
                     return;
                 }
 
                 // Check Manage Server permission
                 bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, args](fluxerpp::models::Member member, bool success) {
                     if (!success) {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to verify your permissions.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to verify your permissions.");
                         return;
                     }
                     if (!is_user_trusted_or_owner(bot, msg.server_id, msg.author.id, member)) {
-                        bot.send_message(msg.channel_id, "⚠️ Permission error: you need Manage Server permission to configure welcome messages.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Permission error: you need Manage Server permission to configure welcome messages.");
                         return;
                     }
 
@@ -194,14 +194,19 @@ public:
                         target += args[i];
                     }
 
+                    // Strip <%roleId> mention wrapper if present (Stoat role mention format)
+                    if (target.rfind("<%", 0) == 0 && target.back() == '>') {
+                        target = target.substr(2, target.size() - 3);
+                    }
+
                     auto config = g_db->get_welcome_leave_config(msg.server_id).value_or(Database::WelcomeLeaveConfig{msg.server_id});
 
                     if (target == "none" || target == "clear" || target == "null") {
                         config.autorole_role_id = "";
                         if (g_db->save_welcome_leave_config(config)) {
-                            bot.send_message(msg.channel_id, "✅ Autorole disabled for this server.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Autorole disabled for this server.");
                         } else {
-                            bot.send_message(msg.channel_id, "⚠️ Failed to save configuration.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration.");
                         }
                         return;
                     }
@@ -209,7 +214,7 @@ public:
                     // Search for role
                     auto server_roles_res = bot.rest().get_server(msg.server_id);
                     if (!server_roles_res.success()) {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to fetch server roles.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to fetch server roles.");
                         return;
                     }
 
@@ -239,7 +244,7 @@ public:
                     }
 
                     if (matching_roles.empty()) {
-                        bot.send_message(msg.channel_id, "⚠️ No roles matching `" + target + "` found.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " No roles matching `" + target + "` found.");
                         return;
                     }
 
@@ -247,9 +252,9 @@ public:
                         auto save_cfg = config;
                         save_cfg.autorole_role_id = role_id;
                         if (g_db->save_welcome_leave_config(save_cfg)) {
-                            bot.send_message(msg.channel_id, "✅ Welcome autorole successfully set to **" + role_name + "** (" + role_id + ").");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Welcome autorole successfully set to **" + role_name + "** (" + role_id + ").");
                         } else {
-                            bot.send_message(msg.channel_id, "⚠️ Failed to save configuration.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration.");
                         }
                     };
 
@@ -287,7 +292,7 @@ public:
                                     }
                                 } catch (...) {}
                             }
-                            bot.send_message(msg.channel_id, "⚠️ Invalid selection or timed out.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Invalid selection or timed out.");
                         });
                     });
                     return;
@@ -313,12 +318,12 @@ public:
 
                     if (g_db->save_welcome_leave_config(config)) {
                         if (target_channel.empty()) {
-                            bot.send_message(msg.channel_id, "✅ Welcome messages have been disabled.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Welcome messages have been disabled.");
                         } else {
-                            bot.send_message(msg.channel_id, "✅ Welcome messages channel set to <#" + target_channel + ">.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Welcome messages channel set to <#" + target_channel + ">.");
                         }
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -331,7 +336,7 @@ public:
 
                     std::string type = args[1];
                     if (type != "text" && type != "embed") {
-                        bot.send_message(msg.channel_id, "⚠️ Type must be `text` or `embed`.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Type must be `text` or `embed`.");
                         return;
                     }
 
@@ -339,9 +344,9 @@ public:
                     config.welcome_type = type;
 
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Welcome message type set to **" + type + "**.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Welcome message type set to **" + type + "**.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -357,9 +362,9 @@ public:
                     config.welcome_content = text;
 
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Welcome message content updated successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Welcome message content updated successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -373,7 +378,7 @@ public:
 
                     auto pairs = parse_pairs(text);
                     if (pairs.empty()) {
-                        bot.send_message(msg.channel_id, "⚠️ No valid key-value pairs found. Format must be `key:value` (e.g. `title:Hello color:random`).");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " No valid key-value pairs found. Format must be `key:value` (e.g. `title:Hello color:random`).");
                         return;
                     }
 
@@ -402,9 +407,9 @@ public:
 
                     config.welcome_embed_json = emb.dump();
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Welcome embed configuration updated successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Welcome embed configuration updated successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -434,7 +439,7 @@ public:
                     try {
                         emb = nlohmann::json::parse(text);
                     } catch (const std::exception& e) {
-                        bot.send_message(msg.channel_id, "⚠️ Invalid JSON format: " + std::string(e.what()));
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Invalid JSON format: " + std::string(e.what()));
                         return;
                     }
 
@@ -453,9 +458,9 @@ public:
 
                     config.welcome_embed_json = emb.dump();
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Welcome embed configuration imported successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Welcome embed configuration imported successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -463,7 +468,7 @@ public:
                 if (subcommand == "test") {
                     auto config_opt = g_db->get_welcome_leave_config(msg.server_id);
                     if (!config_opt || (config_opt->welcome_channel_id.empty() && config_opt->autorole_role_id.empty())) {
-                        bot.send_message(msg.channel_id, "⚠️ Welcomer and autorole features are not set up or are disabled on this server. Use `" + pfx + "welcome setup` or `" + pfx + "welcome role` first.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Welcomer and autorole features are not set up or are disabled on this server. Use `" + pfx + "welcome setup` or `" + pfx + "welcome role` first.");
                         return;
                     }
 
@@ -475,7 +480,7 @@ public:
                             if (role_ok) {
                                 bot.send_message(msg.channel_id, "ℹ️ [Test] Assigned welcome autorole to you.");
                             } else {
-                                bot.send_message(msg.channel_id, "⚠️ [Test] Failed to assign welcome autorole: " + err);
+                                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " [Test] Failed to assign welcome autorole: " + err);
                             }
                         });
                     }
@@ -542,14 +547,15 @@ public:
                                     }
 
                                     send_verbose_test_message(bot, config.welcome_channel_id, payload, msg.channel_id,
-                                         "✅ Test welcome message successfully sent to the configured channel.",
+                                         "" + bronx::emj_yes + " Test welcome message successfully sent to the configured channel.",
                                          "Failed to send test welcome message. Make sure the bot has permission to post in that channel.");
                                 }).detach();
                             } else {
                                 fluxerpp::models::MessagePayload payload;
-                                payload.content = format_placeholders(config.welcome_content, msg.author, server, final_count);
+                                std::string text_body = config.welcome_content.empty() ? "Welcome {name} to {server}!" : config.welcome_content;
+                                payload.content = format_placeholders(text_body, msg.author, server, final_count);
                                 send_verbose_test_message(bot, config.welcome_channel_id, payload, msg.channel_id,
-                                     "✅ Test welcome message successfully sent to the configured channel.",
+                                     "" + bronx::emj_yes + " Test welcome message successfully sent to the configured channel.",
                                      "Failed to send test welcome message. Make sure the bot has permission to post in that channel.");
                             }
                         });
@@ -566,7 +572,7 @@ public:
                     std::string dm_type = args[1];
                     std::transform(dm_type.begin(), dm_type.end(), dm_type.begin(), ::tolower);
                     if (dm_type != "text" && dm_type != "embed" && dm_type != "none") {
-                        bot.send_message(msg.channel_id, "⚠️ DM welcome type must be `text`, `embed`, or `none`.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " DM welcome type must be `text`, `embed`, or `none`.");
                         return;
                     }
 
@@ -574,9 +580,9 @@ public:
                     config.welcome_dm_type = dm_type;
 
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Welcome DM type set to **" + dm_type + "**.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Welcome DM type set to **" + dm_type + "**.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -592,9 +598,9 @@ public:
                     config.welcome_dm_content = text;
 
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Welcome DM message content updated successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Welcome DM message content updated successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -608,7 +614,7 @@ public:
 
                     auto pairs = parse_pairs(text);
                     if (pairs.empty()) {
-                        bot.send_message(msg.channel_id, "⚠️ No valid key-value pairs found.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " No valid key-value pairs found.");
                         return;
                     }
 
@@ -636,9 +642,9 @@ public:
 
                     config.welcome_dm_embed_json = emb.dump();
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Welcome DM embed configuration updated successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Welcome DM embed configuration updated successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -654,7 +660,7 @@ public:
                     try {
                         emb = nlohmann::json::parse(text);
                     } catch (const std::exception& e) {
-                        bot.send_message(msg.channel_id, "⚠️ Invalid JSON format: " + std::string(e.what()));
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Invalid JSON format: " + std::string(e.what()));
                         return;
                     }
 
@@ -672,9 +678,9 @@ public:
 
                     config.welcome_dm_embed_json = emb.dump();
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Welcome DM embed configuration imported successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Welcome DM embed configuration imported successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -682,7 +688,7 @@ public:
                 if (subcommand == "dmtest") {
                     auto config_opt = g_db->get_welcome_leave_config(msg.server_id);
                     if (!config_opt || config_opt->welcome_dm_type == "none") {
-                        bot.send_message(msg.channel_id, "⚠️ DM welcome is not enabled or set up. Use `" + pfx + "welcome dm <text|embed>` first.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " DM welcome is not enabled or set up. Use `" + pfx + "welcome dm <text|embed>` first.");
                         return;
                     }
 
@@ -700,7 +706,7 @@ public:
                         std::thread([&bot, config, msg, server, final_count]() {
                             auto dm_res = bot.rest().open_dm(msg.author.id);
                             if (!dm_res.success() || !dm_res.body.is_object() || !dm_res.body.contains("_id")) {
-                                bot.send_message(msg.channel_id, "⚠️ Failed to open DM with you.");
+                                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to open DM with you.");
                                 return;
                             }
                             std::string dm_channel_id = dm_res.body["_id"].get<std::string>();
@@ -755,7 +761,7 @@ public:
                             }
 
                             send_verbose_test_message(bot, dm_channel_id, payload, msg.channel_id,
-                                "✅ Test welcome DM successfully sent to you.",
+                                "" + bronx::emj_yes + " Test welcome DM successfully sent to you.",
                                 "Failed to send test welcome DM.");
                         }).detach();
                     });
@@ -763,16 +769,16 @@ public:
                 }
 
                 if (subcommand == "setup") {
-                    bot.send_message(msg.channel_id, "💬 **Welcome Setup Wizard**\nLet's configure welcome messages for this server.\n\n**Step 1/7**: Mention a channel (e.g. #general), type its name/ID, or reply `none` to disable.");
+                    bot.send_message(msg.channel_id, "welcome setup [1/7]: specify channel (mention, ID, or `none`).");
                     bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(30), [&bot, msg](std::optional<fluxerpp::events::Message> rep1) {
                         if (!rep1) {
-                            bot.send_message(msg.channel_id, "⏱️ Setup timed out. Welcome setup canceled.");
+                            bot.send_message(msg.channel_id, "setup timed out.");
                             return;
                         }
                         
                         std::string chan_resp = rep1->content;
                         if (chan_resp == "cancel") {
-                            bot.send_message(msg.channel_id, "🚫 Welcome setup canceled.");
+                            bot.send_message(msg.channel_id, "setup cancelled.");
                             return;
                         }
                         std::string target_channel = "";
@@ -797,7 +803,7 @@ public:
                         }
 
                         if (target_channel.empty() && chan_resp != "none") {
-                            bot.send_message(msg.channel_id, "⚠️ Invalid channel. Welcome setup canceled.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid channel. setup cancelled.");
                             return;
                         }
 
@@ -805,39 +811,39 @@ public:
                             auto config = g_db->get_welcome_leave_config(msg.server_id).value_or(Database::WelcomeLeaveConfig{msg.server_id});
                             config.welcome_channel_id = "";
                             g_db->save_welcome_leave_config(config);
-                            bot.send_message(msg.channel_id, "✅ Welcome messages have been disabled.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " welcome messages disabled.");
                             return;
                         }
 
-                        bot.send_message(msg.channel_id, "💬 **Welcome Setup Wizard**\n**Step 2/7**: Choose the message type. Reply with `text` or `embed`.");
+                        bot.send_message(msg.channel_id, "welcome setup [2/7]: specify message type (`text` or `embed`).");
                         bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(30), [&bot, msg, target_channel](std::optional<fluxerpp::events::Message> rep2) {
                             if (!rep2) {
-                                bot.send_message(msg.channel_id, "⏱️ Setup timed out. Welcome setup canceled.");
+                                bot.send_message(msg.channel_id, "setup timed out.");
                                 return;
                             }
 
                             std::string type_resp = rep2->content;
                             std::transform(type_resp.begin(), type_resp.end(), type_resp.begin(), ::tolower);
                             if (type_resp == "cancel") {
-                                bot.send_message(msg.channel_id, "🚫 Welcome setup canceled.");
+                                bot.send_message(msg.channel_id, "setup cancelled.");
                                 return;
                             }
                             if (type_resp != "text" && type_resp != "embed") {
-                                bot.send_message(msg.channel_id, "⚠️ Invalid type (must be `text` or `embed`). Welcome setup canceled.");
+                                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid type (`text` or `embed`). setup cancelled.");
                                 return;
                             }
 
                             if (type_resp == "text") {
-                                bot.send_message(msg.channel_id, "💬 **Welcome Setup Wizard**\n**Step 3/3**: Type the welcome message/content.\n*(You can use tokens like `{user}`, `{username}`, `{server}`, and `{membercount}`)*");
+                                bot.send_message(msg.channel_id, "welcome setup [3/3]: specify welcome message text. tokens: `{user}`, `{username}`, `{server}`, `{membercount}`");
                                 bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(45), [&bot, msg, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep3) {
                                     if (!rep3) {
-                                        bot.send_message(msg.channel_id, "⏱️ Setup timed out. Welcome setup canceled.");
+                                        bot.send_message(msg.channel_id, "setup timed out.");
                                         return;
                                     }
 
                                     std::string content_resp = rep3->content;
                                     if (content_resp == "cancel") {
-                                        bot.send_message(msg.channel_id, "🚫 Welcome setup canceled.");
+                                        bot.send_message(msg.channel_id, "setup cancelled.");
                                         return;
                                     }
                                     auto config = g_db->get_welcome_leave_config(msg.server_id).value_or(Database::WelcomeLeaveConfig{msg.server_id});
@@ -846,90 +852,90 @@ public:
                                     config.welcome_content = content_resp;
 
                                     g_db->save_welcome_leave_config(config);
-                                    bot.send_message(msg.channel_id, "✅ **Welcome Setup Complete!**\nWelcome messages will be sent to <#" + target_channel + "> in text format.");
+                                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " welcome setup complete. channel: <#" + target_channel + ">.");
                                 });
                                 return;
                             }
 
                             // Embed Setup flow:
-                            bot.send_message(msg.channel_id, "💬 **Welcome Setup Wizard**\n**Step 3/7**: Type the embed **title** (or reply `skip`).\n*Available tokens:*\n```\n{user} {username} {server} {membercount}\n```");
+                            bot.send_message(msg.channel_id, "welcome setup [3/7]: specify embed title (or `skip`). tokens: `{user}`, `{username}`, `{server}`, `{membercount}`");
                             bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(60), [&bot, msg, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep3) {
                                 if (!rep3) {
-                                    bot.send_message(msg.channel_id, "⏱️ Setup timed out. Welcome setup canceled.");
+                                    bot.send_message(msg.channel_id, "setup timed out.");
                                     return;
                                 }
 
                                 nlohmann::json emb = nlohmann::json::object();
                                 std::string title_resp = rep3->content;
                                 if (title_resp == "cancel") {
-                                    bot.send_message(msg.channel_id, "🚫 Welcome setup canceled.");
+                                    bot.send_message(msg.channel_id, "setup cancelled.");
                                     return;
                                 }
                                 if (title_resp != "skip") {
                                     emb["title"] = title_resp;
                                 }
 
-                                bot.send_message(msg.channel_id, "💬 **Welcome Setup Wizard**\n**Step 4/7**: Type the embed **description** (or reply `skip`).\n*Available tokens:*\n```\n{user} {username} {server} {membercount}\n```");
+                                bot.send_message(msg.channel_id, "welcome setup [4/7]: specify embed description (or `skip`). tokens: `{user}`, `{username}`, `{server}`, `{membercount}`");
                                 bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(90), [&bot, msg, emb, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep4) {
                                     if (!rep4) {
-                                        bot.send_message(msg.channel_id, "⏱️ Setup timed out. Welcome setup canceled.");
+                                        bot.send_message(msg.channel_id, "setup timed out.");
                                         return;
                                     }
 
                                     auto current_emb = emb;
                                     std::string desc_resp = rep4->content;
                                     if (desc_resp == "cancel") {
-                                        bot.send_message(msg.channel_id, "🚫 Welcome setup canceled.");
+                                        bot.send_message(msg.channel_id, "setup cancelled.");
                                         return;
                                     }
                                     if (desc_resp != "skip") {
                                         current_emb["description"] = desc_resp;
                                     }
 
-                                    bot.send_message(msg.channel_id, "💬 **Welcome Setup Wizard**\n**Step 5/7**: Type the embed **color hex** (e.g. `#5865f2` or `random`, or reply `skip`).");
+                                    bot.send_message(msg.channel_id, "welcome setup [5/7]: specify color hex (or `random` / `skip`).");
                                     bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(30), [&bot, msg, current_emb, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep5) {
                                         if (!rep5) {
-                                            bot.send_message(msg.channel_id, "⏱️ Setup timed out. Welcome setup canceled.");
+                                            bot.send_message(msg.channel_id, "setup timed out.");
                                             return;
                                         }
 
                                         auto final_emb = current_emb;
                                         std::string color_resp = rep5->content;
                                         if (color_resp == "cancel") {
-                                            bot.send_message(msg.channel_id, "🚫 Welcome setup canceled.");
+                                            bot.send_message(msg.channel_id, "setup cancelled.");
                                             return;
                                         }
                                         if (color_resp != "skip") {
                                             final_emb["color"] = color_resp;
                                         }
 
-                                        bot.send_message(msg.channel_id, "💬 **Welcome Setup Wizard**\n**Step 6/7**: Type the embed **image URL** (or reply `skip`).");
+                                        bot.send_message(msg.channel_id, "welcome setup [6/7]: specify embed image URL (or `skip`).");
                                         bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(45), [&bot, msg, final_emb, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep6) {
                                             if (!rep6) {
-                                                bot.send_message(msg.channel_id, "⏱️ Setup timed out. Welcome setup canceled.");
+                                                bot.send_message(msg.channel_id, "setup timed out.");
                                                 return;
                                             }
 
                                             auto save_emb = final_emb;
                                             std::string img_resp = rep6->content;
                                             if (img_resp == "cancel") {
-                                                bot.send_message(msg.channel_id, "🚫 Welcome setup canceled.");
+                                                bot.send_message(msg.channel_id, "setup cancelled.");
                                                 return;
                                             }
                                             if (img_resp != "skip") {
                                                 save_emb["image"] = img_resp;
                                             }
 
-                                            bot.send_message(msg.channel_id, "💬 **Welcome Setup Wizard**\n**Step 7/7**: Type the **message content/text** to show outside the embed (or reply `skip`).\n*(You can use tokens like `{user}`, `{username}`, `{server}`, and `{membercount}`)*");
+                                            bot.send_message(msg.channel_id, "welcome setup [7/7]: specify message text outside embed (or `skip`).");
                                             bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(45), [&bot, msg, save_emb, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep7) {
                                                 if (!rep7) {
-                                                    bot.send_message(msg.channel_id, "⏱️ Setup timed out. Welcome setup canceled.");
+                                                    bot.send_message(msg.channel_id, "setup timed out.");
                                                     return;
                                                 }
 
                                                 std::string content_resp = rep7->content;
                                                 if (content_resp == "cancel") {
-                                                    bot.send_message(msg.channel_id, "🚫 Welcome setup canceled.");
+                                                    bot.send_message(msg.channel_id, "setup cancelled.");
                                                     return;
                                                 }
                                                 auto config = g_db->get_welcome_leave_config(msg.server_id).value_or(Database::WelcomeLeaveConfig{msg.server_id});
@@ -943,7 +949,7 @@ public:
                                                 }
 
                                                 g_db->save_welcome_leave_config(config);
-                                                bot.send_message(msg.channel_id, "✅ **Welcome Setup Complete!**\nWelcome messages will be sent to <#" + target_channel + "> as a rich embed.");
+                                                bot.send_message(msg.channel_id, "" + bronx::emj_yes + " welcome setup complete. channel: <#" + target_channel + ">.");
                                             });
                                         });
                                     });
@@ -954,7 +960,7 @@ public:
                     return;
                 }
 
-                    bot.send_message(msg.channel_id, "⚠️ Unknown subcommand. Use setup, channel, role, type, message, edit, json, test, dm, dmmessage, dmedit, dmjson, or dmtest.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Unknown subcommand. Use setup, channel, role, type, message, edit, json, test, dm, dmmessage, dmedit, dmjson, or dmtest.");
                 });
             },
             "Welcome",
@@ -973,23 +979,23 @@ public:
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 std::cout << "[bronx command] handling leave...\n";
                 if (msg.server_id.empty()) {
-                    bot.send_message(msg.channel_id, "⚠️ This command can only be used in a server channel.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " This command can only be used in a server channel.");
                     return;
                 }
 
                 if (!g_db) {
-                    bot.send_message(msg.channel_id, "⚠️ Database is unavailable.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Database is unavailable.");
                     return;
                 }
 
                 // Check Manage Server permission
                 bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, args](fluxerpp::models::Member member, bool success) {
                     if (!success) {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to verify your permissions.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to verify your permissions.");
                         return;
                     }
                     if (!is_user_trusted_or_owner(bot, msg.server_id, msg.author.id, member)) {
-                        bot.send_message(msg.channel_id, "⚠️ Permission error: you need Manage Server permission to configure leave messages.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Permission error: you need Manage Server permission to configure leave messages.");
                         return;
                     }
 
@@ -1028,12 +1034,12 @@ public:
 
                     if (g_db->save_welcome_leave_config(config)) {
                         if (target_channel.empty()) {
-                            bot.send_message(msg.channel_id, "✅ Leave messages have been disabled.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Leave messages have been disabled.");
                         } else {
-                            bot.send_message(msg.channel_id, "✅ Leave messages channel set to <#" + target_channel + ">.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Leave messages channel set to <#" + target_channel + ">.");
                         }
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -1046,7 +1052,7 @@ public:
 
                     std::string type = args[1];
                     if (type != "text" && type != "embed") {
-                        bot.send_message(msg.channel_id, "⚠️ Type must be `text` or `embed`.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Type must be `text` or `embed`.");
                         return;
                     }
 
@@ -1054,9 +1060,9 @@ public:
                     config.leave_type = type;
 
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Leave message type set to **" + type + "**.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Leave message type set to **" + type + "**.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -1072,9 +1078,9 @@ public:
                     config.leave_content = text;
 
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Leave message content updated successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Leave message content updated successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -1088,7 +1094,7 @@ public:
 
                     auto pairs = parse_pairs(text);
                     if (pairs.empty()) {
-                        bot.send_message(msg.channel_id, "⚠️ No valid key-value pairs found. Format must be `key:value` (e.g. `title:Bye color:random`).");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " No valid key-value pairs found. Format must be `key:value` (e.g. `title:Bye color:random`).");
                         return;
                     }
 
@@ -1117,9 +1123,9 @@ public:
 
                     config.leave_embed_json = emb.dump();
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Leave embed configuration updated successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Leave embed configuration updated successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -1149,7 +1155,7 @@ public:
                     try {
                         emb = nlohmann::json::parse(text);
                     } catch (const std::exception& e) {
-                        bot.send_message(msg.channel_id, "⚠️ Invalid JSON format: " + std::string(e.what()));
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Invalid JSON format: " + std::string(e.what()));
                         return;
                     }
 
@@ -1168,9 +1174,9 @@ public:
 
                     config.leave_embed_json = emb.dump();
                     if (g_db->save_welcome_leave_config(config)) {
-                        bot.send_message(msg.channel_id, "✅ Leave embed configuration imported successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Leave embed configuration imported successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration to database.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration to database.");
                     }
                     return;
                 }
@@ -1178,7 +1184,7 @@ public:
                 if (subcommand == "test") {
                     auto config_opt = g_db->get_welcome_leave_config(msg.server_id);
                     if (!config_opt || config_opt->leave_channel_id.empty()) {
-                        bot.send_message(msg.channel_id, "⚠️ Leave messages are not set up or are disabled on this server. Use `" + pfx + "leave setup` first.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Leave messages are not set up or are disabled on this server. Use `" + pfx + "leave setup` first.");
                         return;
                     }
 
@@ -1243,14 +1249,15 @@ public:
                                     }
 
                                     send_verbose_test_message(bot, config.leave_channel_id, payload, msg.channel_id,
-                                         "✅ Test leave message successfully sent to the configured channel.",
+                                         "" + bronx::emj_yes + " Test leave message successfully sent to the configured channel.",
                                          "Failed to send test leave message. Make sure the bot has permission to post in that channel.");
                                 }).detach();
                             } else {
                                 fluxerpp::models::MessagePayload payload;
-                                payload.content = format_placeholders(config.leave_content, msg.author, server, final_count);
+                                std::string text_body = config.leave_content.empty() ? "{name} left {server}." : config.leave_content;
+                                payload.content = format_placeholders(text_body, msg.author, server, final_count);
                                 send_verbose_test_message(bot, config.leave_channel_id, payload, msg.channel_id,
-                                     "✅ Test leave message successfully sent to the configured channel.",
+                                     "" + bronx::emj_yes + " Test leave message successfully sent to the configured channel.",
                                      "Failed to send test leave message. Make sure the bot has permission to post in that channel.");
                             }
                     });
@@ -1258,10 +1265,10 @@ public:
                 }
 
                 if (subcommand == "setup") {
-                    bot.send_message(msg.channel_id, "💬 **Leave Setup Wizard**\nLet's configure departure messages for this server.\n\n**Step 1/7**: Mention a channel (e.g. #departures), type its name/ID, or reply `none` to disable.");
+                    bot.send_message(msg.channel_id, "leave setup [1/7]: specify channel (mention, ID, or `none`).");
                     bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(30), [&bot, msg](std::optional<fluxerpp::events::Message> rep1) {
                         if (!rep1) {
-                            bot.send_message(msg.channel_id, "⏱️ Setup timed out. Leave setup canceled.");
+                            bot.send_message(msg.channel_id, "setup timed out.");
                             return;
                         }
                         
@@ -1288,7 +1295,7 @@ public:
                         }
 
                         if (target_channel.empty() && chan_resp != "none") {
-                            bot.send_message(msg.channel_id, "⚠️ Invalid channel. Leave setup canceled.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid channel. setup cancelled.");
                             return;
                         }
 
@@ -1296,29 +1303,29 @@ public:
                             auto config = g_db->get_welcome_leave_config(msg.server_id).value_or(Database::WelcomeLeaveConfig{msg.server_id});
                             config.leave_channel_id = "";
                             g_db->save_welcome_leave_config(config);
-                            bot.send_message(msg.channel_id, "✅ Leave messages have been disabled.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " leave messages disabled.");
                             return;
                         }
 
-                        bot.send_message(msg.channel_id, "💬 **Leave Setup Wizard**\n**Step 2/7**: Choose the message type. Reply with `text` or `embed`.");
+                        bot.send_message(msg.channel_id, "leave setup [2/7]: specify message type (`text` or `embed`).");
                         bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(30), [&bot, msg, target_channel](std::optional<fluxerpp::events::Message> rep2) {
                             if (!rep2) {
-                                bot.send_message(msg.channel_id, "⏱️ Setup timed out. Leave setup canceled.");
+                                bot.send_message(msg.channel_id, "setup timed out.");
                                 return;
                             }
 
                             std::string type_resp = rep2->content;
                             std::transform(type_resp.begin(), type_resp.end(), type_resp.begin(), ::tolower);
                             if (type_resp != "text" && type_resp != "embed") {
-                                bot.send_message(msg.channel_id, "⚠️ Invalid type (must be `text` or `embed`). Leave setup canceled.");
+                                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid type (`text` or `embed`). setup cancelled.");
                                 return;
                             }
 
                             if (type_resp == "text") {
-                                bot.send_message(msg.channel_id, "💬 **Leave Setup Wizard**\n**Step 3/3**: Type the departure message/content.\n*(You can use tokens like `{user}`, `{username}`, `{server}`, and `{membercount}`)*");
+                                bot.send_message(msg.channel_id, "leave setup [3/3]: specify departure message text. tokens: `{user}`, `{username}`, `{server}`, `{membercount}`");
                                 bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(45), [&bot, msg, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep3) {
                                     if (!rep3) {
-                                        bot.send_message(msg.channel_id, "⏱️ Setup timed out. Leave setup canceled.");
+                                        bot.send_message(msg.channel_id, "setup timed out.");
                                         return;
                                     }
 
@@ -1329,16 +1336,16 @@ public:
                                     config.leave_content = content_resp;
 
                                     g_db->save_welcome_leave_config(config);
-                                    bot.send_message(msg.channel_id, "✅ **Leave Setup Complete!**\nDeparture messages will be sent to <#" + target_channel + "> in text format.");
+                                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " leave setup complete. channel: <#" + target_channel + ">.");
                                 });
                                 return;
                             }
 
                             // Embed Setup flow:
-                            bot.send_message(msg.channel_id, "💬 **Leave Setup Wizard**\n**Step 3/7**: Type the embed **title** (or reply `skip`).\n*Available tokens:*\n```\n{user} {username} {server} {membercount}\n```");
+                            bot.send_message(msg.channel_id, "leave setup [3/7]: specify embed title (or `skip`). tokens: `{user}`, `{username}`, `{server}`, `{membercount}`");
                             bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(60), [&bot, msg, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep3) {
                                 if (!rep3) {
-                                    bot.send_message(msg.channel_id, "⏱️ Setup timed out. Leave setup canceled.");
+                                    bot.send_message(msg.channel_id, "setup timed out.");
                                     return;
                                 }
 
@@ -1348,10 +1355,10 @@ public:
                                     emb["title"] = title_resp;
                                 }
 
-                                bot.send_message(msg.channel_id, "💬 **Leave Setup Wizard**\n**Step 4/7**: Type the embed **description** (or reply `skip`).\n*Available tokens:*\n```\n{user} {username} {server} {membercount}\n```");
+                                bot.send_message(msg.channel_id, "leave setup [4/7]: specify embed description (or `skip`). tokens: `{user}`, `{username}`, `{server}`, `{membercount}`");
                                 bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(90), [&bot, msg, emb, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep4) {
                                     if (!rep4) {
-                                        bot.send_message(msg.channel_id, "⏱️ Setup timed out. Leave setup canceled.");
+                                        bot.send_message(msg.channel_id, "setup timed out.");
                                         return;
                                     }
 
@@ -1361,10 +1368,10 @@ public:
                                         current_emb["description"] = desc_resp;
                                     }
 
-                                    bot.send_message(msg.channel_id, "💬 **Leave Setup Wizard**\n**Step 5/7**: Type the embed **color hex** (e.g. `#ff5555` or `random`, or reply `skip`).");
+                                    bot.send_message(msg.channel_id, "leave setup [5/7]: specify color hex (or `random` / `skip`).");
                                     bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(30), [&bot, msg, current_emb, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep5) {
                                         if (!rep5) {
-                                            bot.send_message(msg.channel_id, "⏱️ Setup timed out. Leave setup canceled.");
+                                            bot.send_message(msg.channel_id, "setup timed out.");
                                             return;
                                         }
 
@@ -1374,10 +1381,10 @@ public:
                                             final_emb["color"] = color_resp;
                                         }
 
-                                        bot.send_message(msg.channel_id, "💬 **Leave Setup Wizard**\n**Step 6/7**: Type the embed **image URL** (or reply `skip`).");
+                                        bot.send_message(msg.channel_id, "leave setup [6/7]: specify embed image URL (or `skip`).");
                                         bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(45), [&bot, msg, final_emb, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep6) {
                                             if (!rep6) {
-                                                bot.send_message(msg.channel_id, "⏱️ Setup timed out. Leave setup canceled.");
+                                                bot.send_message(msg.channel_id, "setup timed out.");
                                                 return;
                                             }
 
@@ -1387,10 +1394,10 @@ public:
                                                 save_emb["image"] = img_resp;
                                             }
 
-                                            bot.send_message(msg.channel_id, "💬 **Leave Setup Wizard**\n**Step 7/7**: Type the **message content/text** to show outside the embed (or reply `skip`).\n*(You can use tokens like `{user}`, `{username}`, `{server}`, and `{membercount}`)*");
+                                            bot.send_message(msg.channel_id, "leave setup [7/7]: specify message text outside embed (or `skip`).");
                                             bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(45), [&bot, msg, save_emb, target_channel, type_resp](std::optional<fluxerpp::events::Message> rep7) {
                                                 if (!rep7) {
-                                                    bot.send_message(msg.channel_id, "⏱️ Setup timed out. Leave setup canceled.");
+                                                    bot.send_message(msg.channel_id, "setup timed out.");
                                                     return;
                                                 }
 
@@ -1406,7 +1413,7 @@ public:
                                                 }
 
                                                 g_db->save_welcome_leave_config(config);
-                                                bot.send_message(msg.channel_id, "✅ **Leave Setup Complete!**\nDeparture messages will be sent to <#" + target_channel + "> as a rich embed.");
+                                                bot.send_message(msg.channel_id, "" + bronx::emj_yes + " leave setup complete. channel: <#" + target_channel + ">.");
                                             });
                                         });
                                     });
@@ -1417,7 +1424,7 @@ public:
                     return;
                 }
 
-                    bot.send_message(msg.channel_id, "⚠️ Unknown subcommand. Use setup, channel, type, message, edit, json, or test.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Unknown subcommand. Use setup, channel, type, message, edit, json, or test.");
                 });
             },
             "Leave",
@@ -1426,8 +1433,167 @@ public:
             {"setup", "channel <#channel|none>", "type <text|embed>", "message <text...>", "edit <key:val...>", "json <raw_json>", "test"}
         });
 
+        // --- AUTOROLE COMMAND ---
+        bot.register_command({
+            "autorole",
+            {"joinrole"},
+            "manage the server's join autorole.",
+            "autorole [role|off]",
+            {"[role|off]"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " This command can only be used in a server channel.");
+                    return;
+                }
+
+                if (!g_db) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Database is unavailable.");
+                    return;
+                }
+
+                auto config = g_db->get_welcome_leave_config(msg.server_id).value_or(Database::WelcomeLeaveConfig{msg.server_id});
+
+                if (args.empty()) {
+                    if (config.autorole_role_id.empty()) {
+                        bot.send_message(msg.channel_id, "ℹ️ No autorole is currently configured.\nUse `" + (msg.prefix.empty() ? "." : msg.prefix) + "autorole <role>` to set one.");
+                    } else {
+                        std::string role_display = config.autorole_role_id;
+                        auto srv_res = bot.rest().get_server(msg.server_id);
+                        if (srv_res.success() && srv_res.body.contains("roles") && srv_res.body["roles"].is_object()) {
+                            if (srv_res.body["roles"].contains(config.autorole_role_id)) {
+                                auto r = srv_res.body["roles"][config.autorole_role_id];
+                                if (r.contains("name")) role_display = r["name"].get<std::string>();
+                            }
+                        }
+                        bot.send_message(msg.channel_id, "🛡️ Current autorole: **" + role_display + "** (`" + config.autorole_role_id + "`)\nUse `" + (msg.prefix.empty() ? "." : msg.prefix) + "autorole off` to disable.");
+                    }
+                    return;
+                }
+
+                bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, args, config](fluxerpp::models::Member member, bool success) {
+                    if (!success) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to verify your permissions.");
+                        return;
+                    }
+                    if (!is_user_trusted_or_owner(bot, msg.server_id, msg.author.id, member)) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Permission error: you need Manage Server permission to configure autorole.");
+                        return;
+                    }
+
+                    std::string target = "";
+                    for (size_t i = 0; i < args.size(); ++i) {
+                        if (i > 0) target += " ";
+                        target += args[i];
+                    }
+
+                    if (target.rfind("<%", 0) == 0 && target.back() == '>') {
+                        target = target.substr(2, target.size() - 3);
+                    }
+
+                    if (target == "none" || target == "clear" || target == "null" || target == "off" || target == "disable") {
+                        auto save_cfg = config;
+                        save_cfg.autorole_role_id = "";
+                        if (g_db->save_welcome_leave_config(save_cfg)) {
+                            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Autorole disabled for this server.");
+                        } else {
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration.");
+                        }
+                        return;
+                    }
+
+                    auto server_roles_res = bot.rest().get_server(msg.server_id);
+                    if (!server_roles_res.success()) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to fetch server roles.");
+                        return;
+                    }
+
+                    auto server_obj = server_roles_res.body;
+                    std::vector<std::pair<std::string, std::string>> matching_roles;
+                    if (server_obj.contains("roles") && server_obj["roles"].is_object()) {
+                        for (auto& [role_id, role_json] : server_obj["roles"].items()) {
+                            std::string role_name = role_json.contains("name") ? role_json["name"].get<std::string>() : "";
+                            
+                            std::string norm_target = target;
+                            std::string norm_name = role_name;
+                            std::string norm_id = role_id;
+                            std::transform(norm_target.begin(), norm_target.end(), norm_target.begin(), ::tolower);
+                            std::transform(norm_name.begin(), norm_name.end(), norm_name.begin(), ::tolower);
+                            std::transform(norm_id.begin(), norm_id.end(), norm_id.begin(), ::tolower);
+
+                            if (norm_id == norm_target || norm_name == norm_target) {
+                                matching_roles.clear();
+                                matching_roles.push_back({role_id, role_name});
+                                break;
+                            }
+
+                            if (norm_name.find(norm_target) != std::string::npos) {
+                                matching_roles.push_back({role_id, role_name});
+                            }
+                        }
+                    }
+
+                    if (matching_roles.empty()) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " No roles matching `" + target + "` found.");
+                        return;
+                    }
+
+                    auto save_cfg = config;
+                    save_cfg.autorole_role_id = matching_roles[0].first;
+                    if (g_db->save_welcome_leave_config(save_cfg)) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Autorole successfully set to **" + matching_roles[0].second + "** (`" + matching_roles[0].first + "`).");
+                    } else {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration.");
+                    }
+                });
+            },
+            "Moderation"
+        });
+
         // --- GATEWAY MEMBER JOIN HOOK ---
         bot.on_server_member_join([&bot](const fluxerpp::events::ServerMemberJoin& e) {
+            if (e.user_id == bot.current_user().id) return;
+            if (g_db) g_db->increment_guild_member_joins(e.server_id);
+
+            // Sticky Roles Enforcement: re-apply jail role if user rejoins while jailed
+            if (g_db) {
+                auto active_jail = g_db->get_active_jail(e.server_id, e.user_id);
+                if (active_jail) {
+                    auto jail_cfg = g_db->get_jail_config(e.server_id);
+                    if (jail_cfg && !jail_cfg->jail_role_id.empty()) {
+                        std::cout << "[bronx sticky] user " << e.user_id << " rejoined " << e.server_id
+                                  << " while jailed! Re-applying jail role...\n";
+                        nlohmann::json edit_fields;
+                        edit_fields["roles"] = { jail_cfg->jail_role_id };
+                        bot.rest().edit_member(e.server_id, e.user_id, edit_fields);
+                        return; // Prevent normal autorole/welcome for evasion rejoiners
+                    }
+                }
+
+                // Sticky Temporary Roles: re-apply active unexpired temporary roles on rejoin
+                auto active_trs = g_db->get_active_temp_roles(e.server_id, e.user_id);
+                if (!active_trs.empty()) {
+                    auto now_unix = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+                    std::vector<std::string> due_restore_roles;
+                    for (const auto& tr : active_trs) {
+                        if (tr.expires_at > now_unix) {
+                            due_restore_roles.push_back(tr.role_id);
+                        }
+                    }
+                    if (!due_restore_roles.empty()) {
+                        // Sequential callback chain avoids overlapping GET+PATCH races across concurrent add_role_to_member calls
+                        auto apply_next = std::make_shared<std::function<void(size_t)>>();
+                        *apply_next = [&bot, e, due_restore_roles, apply_next](size_t idx) {
+                            if (idx >= due_restore_roles.size()) return;
+                            bot.add_role_to_member(e.server_id, e.user_id, due_restore_roles[idx], [apply_next, idx](bool, std::string) {
+                                (*apply_next)(idx + 1);
+                            });
+                        };
+                        (*apply_next)(0);
+                    }
+                }
+            }
+
             auto config_opt = g_db->get_welcome_leave_config(e.server_id);
             if (!config_opt) return;
 
@@ -1436,7 +1602,11 @@ public:
             // 1. Assign custom Autorole if configured
             if (!config.autorole_role_id.empty()) {
                 std::cout << "[bronx autorole] assigning role " << config.autorole_role_id << " to member " << e.user_id << " in " << e.server_id << "\n";
-                bot.add_role_to_member(e.server_id, e.user_id, config.autorole_role_id);
+                bot.add_role_to_member(e.server_id, e.user_id, config.autorole_role_id, [e, config](bool ok, std::string err) {
+                    if (!ok) {
+                        std::cerr << "[bronx autorole] failed to assign role " << config.autorole_role_id << " to member " << e.user_id << " in " << e.server_id << ": " << err << "\n";
+                    }
+                });
             }
 
             // 2. Dispatch Welcome Message if configured
@@ -1507,7 +1677,8 @@ public:
                             }).detach();
                         } else {
                             fluxerpp::models::MessagePayload payload;
-                            payload.content = format_placeholders(config.welcome_content, user, server, final_count);
+                            std::string text_body = config.welcome_content.empty() ? "Welcome {name} to {server}!" : config.welcome_content;
+                            payload.content = format_placeholders(text_body, user, server, final_count);
                             bot.send_message(config.welcome_channel_id, payload);
                         }
                     });
@@ -1596,6 +1767,9 @@ public:
 
         // --- GATEWAY MEMBER LEAVE HOOK ---
         bot.on_server_member_leave([&bot](const fluxerpp::events::ServerMemberLeave& e) {
+            if (e.user_id == bot.current_user().id) return;
+            if (g_db) g_db->increment_guild_member_leaves(e.server_id);
+
             auto config_opt = g_db->get_welcome_leave_config(e.server_id);
             if (!config_opt || config_opt->leave_channel_id.empty()) return;
 
@@ -1666,7 +1840,8 @@ public:
                         }).detach();
                     } else {
                         fluxerpp::models::MessagePayload payload;
-                        payload.content = format_placeholders(config.leave_content, user, server, final_count);
+                        std::string text_body = config.leave_content.empty() ? "{name} left {server}." : config.leave_content;
+                        payload.content = format_placeholders(text_body, user, server, final_count);
                         bot.send_message(config.leave_channel_id, payload);
                     }
                 });

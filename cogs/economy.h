@@ -33,6 +33,100 @@ private:
         return std::to_string(seconds) + "s";
     }
 
+    static int64_t parse_amount(std::string str, int64_t max_val = 0) {
+        std::transform(str.begin(), str.end(), str.begin(), ::tolower);
+        if (str == "all" || str == "max") return max_val;
+        if (str == "half") return max_val / 2;
+        try {
+            double mult = 1.0;
+            if (!str.empty() && str.back() == 'k') { mult = 1e3; str.pop_back(); }
+            else if (!str.empty() && str.back() == 'm') { mult = 1e6; str.pop_back(); }
+            else if (!str.empty() && str.back() == 'b') { mult = 1e9; str.pop_back(); }
+            double val = std::stod(str) * mult;
+            return static_cast<int64_t>(val);
+        } catch (...) {
+            return -1;
+        }
+    }
+
+    std::string prefix_for(const fluxerpp::cluster& bot,
+                           const fluxerpp::events::Message& msg) const {
+        return msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
+    }
+
+    void show_general_shop(fluxerpp::cluster& bot,
+                           const fluxerpp::events::Message& msg) {
+        if (!g_db) return;
+
+        fluxerpp::models::MessagePayload payload;
+        payload.content = " ";
+        fluxerpp::models::Embed embed;
+        embed.set_colour(0x2ECC71);
+        embed.set_title("🛒 Bronx General Economy Shop");
+
+        const std::string prefix = prefix_for(bot, msg);
+        std::string desc = "Buy with `" + prefix +
+                           "shop buy general <item_id> [quantity]`; activate "
+                           "owned items with `" + prefix + "use <item_id>`.\n\n";
+
+        desc += "🛡️ **`robbery_guard` — Robbery Guard**\n"
+                "   Price: **5,000** coins | Duration: **24 Hours**\n"
+                "   *Prevents anyone from robbing you for 24 hours while active.*\n\n";
+
+        desc += "💥 **`reverse_card` — Uno Reverse Card**\n"
+                "   Price: **15,000** coins | Duration: **24 Hours**\n"
+                "   *Gotcha trap! Anyone robbing you within 24 hours gets robbed back instead.*\n\n";
+
+        desc += "🔍 **`item_detector` — Item Detector**\n"
+                "   Price: **2,500** coins | Charges: **5 Uses**\n"
+                "   *Scans a target user to see if they have active protections or traps (`" +
+                prefix + "detect <user>`).*\n\n";
+
+        auto custom_items = g_db->get_custom_shop_items();
+        if (!custom_items.empty()) {
+            desc += "✨ **CUSTOM SHOP ITEMS:**\n";
+            for (const auto& item : custom_items) {
+                desc += "• `" + item.item_id + "` — **" + item.name + "** (" +
+                        std::to_string(item.cost) + " coins)\n   " +
+                        item.description + "\n";
+            }
+        }
+
+        desc += "\n*Check your items with `" + prefix + "inventory`.*";
+        embed.set_description(desc);
+        payload.add_embed(embed);
+        bot.send_message(msg.channel_id, payload);
+    }
+
+    bool route_shop_command(fluxerpp::cluster& bot,
+                            const fluxerpp::events::Message& msg,
+                            const std::string& command_name,
+                            const std::vector<std::string>& args) {
+        for (const auto& command : bot.get_commands()) {
+            if (command.name != command_name) continue;
+            if (command.cooldown_seconds > 0 || command.required_permissions > 0)
+                return false;
+
+            if (!msg.server_id.empty() && g_db) {
+                std::string name = command.name;
+                std::string category = command.category;
+                std::transform(name.begin(), name.end(), name.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                std::transform(category.begin(), category.end(), category.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                if (g_db->is_disabled(msg.server_id, name, category)) {
+                    bot.send_message(msg.channel_id,
+                                     "That shop action is currently disabled in this server.");
+                    return true;
+                }
+            }
+
+            command.callback(bot, msg, args);
+            return true;
+        }
+        return false;
+    }
+
 public:
     void register_handlers(fluxerpp::cluster& bot) override {
         // 1. balance command
@@ -58,6 +152,7 @@ public:
                     bot.send_message(msg.channel_id, "could not retrieve user data.");
                     return;
                 }
+                auto fishing = g_db->get_fishing_user(target_uid);
 
                 fluxerpp::models::MessagePayload payload;
                 payload.content = " ";
@@ -71,7 +166,17 @@ public:
                     "wallet: **" + std::to_string(u->wallet) + "**\n"
                     "bank: **" + std::to_string(u->bank) + "** / **" + std::to_string(u->bank_limit) + "**\n"
                     "networth: **" + std::to_string(u->wallet + u->bank) + "**\n"
-                    "prestige: **" + std::to_string(u->prestige) + "**\n";
+                    "economy prestige: **" + std::to_string(u->prestige) + "**\n";
+                if (fishing) {
+                    desc += "fishing prestige: **Tier " +
+                            std::to_string(fishing->fish_prestige) + "**\n"
+                            "prestige tokens: **" +
+                            std::to_string(fishing->prestige_tokens) +
+                            "** 🪙 — spend with `" + bot.config().command_prefix +
+                            "fish shop prestige`";
+                } else {
+                    desc += "prestige tokens: unavailable";
+                }
                 embed.set_description(desc);
 
                 payload.add_embed(embed);
@@ -155,42 +260,58 @@ public:
             "pay",
             {"give", "transfer"},
             "gives coins from your wallet to another user.",
-            "pay <user> <amount>",
+            "pay <user> <amount> (or pay <amount> <user>)",
             {"<user>", "<amount>"},
             [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (!g_db) return;
 
                 if (args.size() < 2) {
-                    bot.send_message(msg.channel_id, "invalid syntax. use `pay <user> <amount>`.");
-                    return;
-                }
-
-                std::string target_uid = resolve_user_id(args[0]);
-                if (target_uid == msg.author.id) {
-                    bot.send_message(msg.channel_id, "you cannot pay yourself.");
-                    return;
-                }
-
-                int64_t amount = 0;
-                try {
-                    amount = std::stoll(args[1]);
-                } catch (...) {}
-
-                if (amount <= 0) {
-                    bot.send_message(msg.channel_id, "please provide a valid positive amount.");
+                    bot.send_message(msg.channel_id, "Usage: `pay <user> <amount>` (or `pay <amount> <user>`).");
                     return;
                 }
 
                 auto self = g_db->get_economy_user(msg.author.id);
-                if (!self || self->wallet < amount) {
-                    bot.send_message(msg.channel_id, "you do not have enough coins in your wallet.");
+                if (!self) return;
+
+                std::string target_uid;
+                int64_t amount = 0;
+
+                // Support both orders: pay <user> <amount> AND pay <amount> <user>
+                bool first_is_num = false;
+                try {
+                    int64_t parsed = parse_amount(args[0], self->wallet);
+                    if (parsed > 0) {
+                        amount = parsed;
+                        first_is_num = true;
+                    }
+                } catch (...) {}
+
+                if (first_is_num) {
+                    target_uid = resolve_user_id(args[1]);
+                } else {
+                    target_uid = resolve_user_id(args[0]);
+                    amount = parse_amount(args[1], self->wallet);
+                }
+
+                if (target_uid.empty() || target_uid == msg.author.id) {
+                    bot.send_message(msg.channel_id, "You cannot pay yourself or an invalid user.");
+                    return;
+                }
+
+                if (amount <= 0) {
+                    bot.send_message(msg.channel_id, "Please provide a valid positive amount. Usage: `pay <user> <amount>`");
+                    return;
+                }
+
+                if (self->wallet < amount) {
+                    bot.send_message(msg.channel_id, "You do not have enough coins in your wallet. (Wallet: **" + std::to_string(self->wallet) + "** coins)");
                     return;
                 }
 
                 g_db->update_balances(msg.author.id, -amount, 0);
                 g_db->update_balances(target_uid, amount, 0);
 
-                bot.send_message(msg.channel_id, "you paid **" + std::to_string(amount) + "** coins to <@" + target_uid + ">.");
+                bot.send_message(msg.channel_id, "💸 You paid **" + std::to_string(amount) + "** coins to <@" + target_uid + ">.");
             },
             "Economy"
         });
@@ -200,41 +321,34 @@ public:
             "deposit",
             {"dep"},
             "deposits coins from your wallet into your bank.",
-            "deposit <amount/all>",
+            "deposit <amount/all/half/1k/5m>",
             {"<amount>"},
             [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (!g_db) return;
 
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "invalid syntax. use `deposit <amount/all>`.");
+                    bot.send_message(msg.channel_id, "Usage: `deposit <amount/all/half/1k/5m>`.");
                     return;
                 }
 
                 auto self = g_db->get_economy_user(msg.author.id);
                 if (!self) return;
 
-                int64_t amount = 0;
-                if (args[0] == "all" || args[0] == "max") {
-                    amount = self->wallet;
-                } else {
-                    try {
-                        amount = std::stoll(args[0]);
-                    } catch (...) {}
-                }
+                int64_t amount = parse_amount(args[0], self->wallet);
 
                 if (amount <= 0) {
-                    bot.send_message(msg.channel_id, "please provide a valid positive amount.");
+                    bot.send_message(msg.channel_id, "Please provide a valid positive amount (e.g. `deposit 500`, `dep all`, `dep half`, `dep 10k`).");
                     return;
                 }
 
                 if (self->wallet < amount) {
-                    bot.send_message(msg.channel_id, "you do not have enough coins in your wallet.");
+                    bot.send_message(msg.channel_id, "You do not have enough coins in your wallet. (Wallet: **" + std::to_string(self->wallet) + "** coins)");
                     return;
                 }
 
                 int64_t space_remaining = self->bank_limit - self->bank;
                 if (space_remaining <= 0) {
-                    bot.send_message(msg.channel_id, "your bank is already full.");
+                    bot.send_message(msg.channel_id, "Your bank is already full! (Cap: **" + std::to_string(self->bank_limit) + "** coins)");
                     return;
                 }
 
@@ -243,7 +357,7 @@ public:
                 }
 
                 g_db->update_balances(msg.author.id, -amount, amount);
-                bot.send_message(msg.channel_id, "you deposited **" + std::to_string(amount) + "** coins into your bank.");
+                bot.send_message(msg.channel_id, "🏦 Deposited **" + std::to_string(amount) + "** coins into your bank.");
             },
             "Economy"
         });
@@ -253,40 +367,33 @@ public:
             "withdraw",
             {"with"},
             "withdraws coins from your bank into your wallet.",
-            "withdraw <amount/all>",
+            "withdraw <amount/all/half/1k/5m>",
             {"<amount>"},
             [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (!g_db) return;
 
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "invalid syntax. use `withdraw <amount/all>`.");
+                    bot.send_message(msg.channel_id, "Usage: `withdraw <amount/all/half/1k/5m>`.");
                     return;
                 }
 
                 auto self = g_db->get_economy_user(msg.author.id);
                 if (!self) return;
 
-                int64_t amount = 0;
-                if (args[0] == "all" || args[0] == "max") {
-                    amount = self->bank;
-                } else {
-                    try {
-                        amount = std::stoll(args[0]);
-                    } catch (...) {}
-                }
+                int64_t amount = parse_amount(args[0], self->bank);
 
                 if (amount <= 0) {
-                    bot.send_message(msg.channel_id, "please provide a valid positive amount.");
+                    bot.send_message(msg.channel_id, "Please provide a valid positive amount (e.g. `withdraw 500`, `with all`, `with half`, `with 10k`).");
                     return;
                 }
 
                 if (self->bank < amount) {
-                    bot.send_message(msg.channel_id, "you do not have enough coins in your bank.");
+                    bot.send_message(msg.channel_id, "You do not have enough coins in your bank. (Bank balance: **" + std::to_string(self->bank) + "** coins)");
                     return;
                 }
 
                 g_db->update_balances(msg.author.id, amount, -amount);
-                bot.send_message(msg.channel_id, "you withdrew **" + std::to_string(amount) + "** coins from your bank.");
+                bot.send_message(msg.channel_id, "💵 Withdrew **" + std::to_string(amount) + "** coins from your bank.");
             },
             "Economy"
         });
@@ -320,6 +427,46 @@ public:
 
                 auto self = g_db->get_economy_user(msg.author.id);
                 if (!self) return;
+
+                // 1. Check Uno Reverse Card trap
+                if (g_db->is_item_active(target_uid, "reverse_card")) {
+                    g_db->remove_user_economy_item(target_uid, "reverse_card", 1);
+
+                    std::random_device rd;
+                    std::mt19937 gen(rd());
+                    std::uniform_int_distribution<int> success_dist(0, 1);
+                    bool rev_success = (success_dist(gen) == 1);
+
+                    if (rev_success) {
+                        std::uniform_real_distribution<double> percent_dist(0.20, 0.60);
+                        double percent = percent_dist(gen);
+                        int64_t stolen = static_cast<int64_t>(self->wallet * percent);
+                        if (stolen < 1) stolen = 1;
+
+                        g_db->update_balances(target_uid, stolen, 0);
+                        g_db->update_balances(msg.author.id, -stolen, 0);
+
+                        bot.send_message(msg.channel_id, "💥 **GOTCHA!** <@" + target_uid + "> activated an **Uno Reverse Card**! The robbery backfired and <@" + target_uid + "> robbed **" + std::to_string(stolen) + "** coins from <@" + msg.author.id + ">!");
+                    } else {
+                        std::uniform_real_distribution<double> fine_dist(0.10, 0.20);
+                        double percent = fine_dist(gen);
+                        int64_t fine = static_cast<int64_t>(target->wallet * percent);
+                        if (fine < 100) fine = 100;
+                        if (target->wallet < fine) fine = target->wallet;
+
+                        g_db->update_balances(target_uid, -fine, 0);
+                        g_db->update_balances(msg.author.id, fine, 0);
+
+                        bot.send_message(msg.channel_id, "💥 **GOTCHA!** <@" + target_uid + "> activated an **Uno Reverse Card**! However, their counter-attack failed and they were fined **" + std::to_string(fine) + "** coins to <@" + msg.author.id + ">!");
+                    }
+                    return;
+                }
+
+                // 2. Check Robbery Guard protection
+                if (g_db->is_item_active(target_uid, "robbery_guard")) {
+                    bot.send_message(msg.channel_id, "🛡️ **Robbery Blocked!** <@" + target_uid + "> is protected by an active **Robbery Guard**.");
+                    return;
+                }
 
                 std::random_device rd;
                 std::mt19937 gen(rd());
@@ -361,27 +508,78 @@ public:
             "leaderboard",
             {"lb", "rich"},
             "shows the richest users in the server.",
-            "leaderboard",
-            {},
+            "leaderboard [server/global]",
+            {"[scope]"},
             [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (!g_db) return;
 
-                auto top = g_db->get_top_economy_users(10);
+                bool is_global = (!args.empty() && (args[0] == "global" || args[0] == "all" || args[0] == "g"));
+
+                std::vector<Database::TopEcoEntry> top_entries;
+
+                if (is_global || msg.server_id.empty()) {
+                    top_entries = g_db->get_top_economy_users(10);
+                } else {
+                    // Fetch candidate top economy users
+                    auto candidate_top = g_db->get_top_economy_users(250);
+
+                    // Fetch server members list
+                    std::unordered_set<std::string> server_member_ids;
+                    auto res = bot.rest().get_server_members(msg.server_id);
+                    if (res.success()) {
+                        nlohmann::json members_arr;
+                        if (res.body.is_array()) {
+                            members_arr = res.body;
+                        } else if (res.body.is_object() && res.body.contains("members") && res.body["members"].is_array()) {
+                            members_arr = res.body["members"];
+                        }
+                        for (const auto& item : members_arr) {
+                            auto m = fluxerpp::models::Member::from_json(item);
+                            if (!m.id.empty()) {
+                                server_member_ids.insert(m.id);
+                            }
+                        }
+                    }
+
+                    for (const auto& entry : candidate_top) {
+                        if (top_entries.size() >= 10) break;
+
+                        bool is_in_server = false;
+                        if (!server_member_ids.empty()) {
+                            is_in_server = (server_member_ids.count(entry.user_id) > 0);
+                        } else {
+                            auto mem_opt = bot.get_member(msg.server_id, entry.user_id);
+                            if (mem_opt) {
+                                is_in_server = true;
+                            } else {
+                                auto r_mem = bot.rest().get_server_member(msg.server_id, entry.user_id);
+                                is_in_server = r_mem.success();
+                            }
+                        }
+
+                        if (is_in_server) {
+                            top_entries.push_back(entry);
+                        }
+                    }
+                }
 
                 fluxerpp::models::MessagePayload payload;
                 payload.content = " ";
                 fluxerpp::models::Embed embed;
                 embed.set_colour(0x5865F2);
-                embed.set_title("bronx economy — leaderboard");
+                embed.set_title(is_global ? "bronx economy — global leaderboard" : "bronx economy — server leaderboard");
 
                 std::string desc;
-                if (top.empty()) {
-                    desc = "no user balance records found.";
+                if (top_entries.empty()) {
+                    desc = "no user balance records found for this server.";
                 } else {
                     int rank = 1;
-                    for (const auto& u : top) {
+                    for (const auto& u : top_entries) {
                         desc += std::to_string(rank) + ". <@" + u.user_id + "> — **" + std::to_string(u.networth) + "** coins\n";
                         rank++;
+                    }
+                    if (!is_global) {
+                        desc += "\n*Tip: Use `.lb global` to view global rankings.*";
                     }
                 }
                 embed.set_description(desc);
@@ -391,6 +589,7 @@ public:
             },
             "Economy"
         });
+
 
         // 9. coinflip command
         bot.register_command({
@@ -851,7 +1050,7 @@ public:
 
                     if (answer != "higher" && answer != "h" && answer != "lower" && answer != "l") {
                         g_db->update_balances(msg.author.id, -bet, 0);
-                        bot.send_message(msg.channel_id, "❌ Invalid guess! You lost your bet of **" + std::to_string(bet) + "** coins.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " Invalid guess! You lost your bet of **" + std::to_string(bet) + "** coins.");
                         return;
                     }
 
@@ -871,7 +1070,7 @@ public:
                         desc += "🎉 Correct! You won **" + std::to_string(bet) + "** coins!";
                     } else {
                         g_db->update_balances(msg.author.id, -bet, 0);
-                        desc += "❌ Incorrect! You lost **" + std::to_string(bet) + "** coins.";
+                        desc += "" + bronx::emj_no + " Incorrect! You lost **" + std::to_string(bet) + "** coins.";
                     }
                     embed.set_description(desc);
                     payload.add_embed(embed);
@@ -900,13 +1099,13 @@ public:
                 int64_t required = 250000 * (self->prestige + 1);
 
                 if (networth < required) {
-                    bot.send_message(msg.channel_id, "❌ **Prestige Requirements Not Met**\n"
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " **Prestige Requirements Not Met**\n"
                                                      "You need a net worth of **" + std::to_string(required) + "** coins to prestige to level **" + std::to_string(self->prestige + 1) + "**.\n"
                                                      "Your current net worth is **" + std::to_string(networth) + "** coins.");
                     return;
                 }
 
-                bot.send_message(msg.channel_id, "⚠️ **Confirm Prestige Level " + std::to_string(self->prestige + 1) + "**\n"
+                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " **Confirm Prestige Level " + std::to_string(self->prestige + 1) + "**\n"
                                                  "Prestiging resets your **wallet** and **bank** balance to **0**!\n"
                                                  "In return, you will gain:\n"
                                                  "- Permanent **+15%** earnings multiplier (new total: **+" + std::to_string((self->prestige + 1) * 15) + "%**)\n"
@@ -930,7 +1129,7 @@ public:
                         int64_t current_networth = current->wallet + current->bank;
                         int64_t req = 250000 * (current->prestige + 1);
                         if (current_networth < req) {
-                            bot.send_message(msg.channel_id, "❌ Your net worth has changed and you no longer meet the prestige requirement.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_no + " Your net worth has changed and you no longer meet the prestige requirement.");
                             return;
                         }
 
@@ -941,12 +1140,529 @@ public:
                                                              "Congratulations <@" + msg.author.id + ">, you have prestiged to level **" + std::to_string(new_prestige) + "**!\n"
                                                              "Your new bank limit is **" + std::to_string(new_limit) + "** coins, and your earnings are boosted by **+" + std::to_string(new_prestige * 15) + "%**!");
                         } else {
-                            bot.send_message(msg.channel_id, "❌ An error occurred while prestiging. Please try again.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_no + " An error occurred while prestiging. Please try again.");
                         }
                     } else {
-                        bot.send_message(msg.channel_id, "❌ Confirmation failed. Prestige cancelled.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " Confirmation failed. Prestige cancelled.");
                     }
                 });
+            },
+            "Economy"
+        });
+
+        // 16. inventory command
+        bot.register_command({
+            "inventory",
+            {"inv", "items", "bag"},
+            "shows your inventory including event items, general economy items, and fishing gear.",
+            "inventory [user]",
+            {"[user]"},
+            [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (!g_db) return;
+
+                std::string target_query = args.empty() ? msg.author.id : args[0];
+                helpers::resolve_user(bot, msg.server_id, target_query, [this, &bot, msg](fluxerpp::models::User target_user, fluxerpp::models::Member, bool success) {
+                    if (!success) {
+                        bot.send_message(msg.channel_id, "could not resolve target user.");
+                        return;
+                    }
+                    if (!g_db) return;
+
+                    std::string target_uid = target_user.id;
+                    auto eco = g_db->get_economy_user(target_uid);
+                    auto fish = g_db->get_fishing_user(target_uid);
+                    auto user_items = g_db->get_user_economy_items(target_uid);
+
+                    fluxerpp::models::MessagePayload payload;
+                    payload.content = " ";
+                    fluxerpp::models::Embed embed;
+                    embed.set_colour(0x5865F2);
+                    embed.set_title("🎒 " + target_user.username + "'s Inventory");
+
+                    std::string desc = "";
+
+                    // 🎫 Section 1: Event Items
+                    desc += "🎫 **EVENT ITEMS & CURRENCY**\n";
+                    int event_tokens = fish ? fish->event_tokens : 0;
+                    desc += "• Event Tokens: **" + std::to_string(event_tokens) + "** 🎫\n";
+
+                    auto user_pets = g_db->get_user_pets(target_uid);
+                    if (!user_pets.empty()) {
+                        desc += "• Event / Companion Pets Unlocked: **" + std::to_string(user_pets.size()) + "** pets (`.fish pets`)\n";
+                    }
+                    desc += "\n";
+
+                    // 🎒 Section 2: General Economy Items
+                    desc += "🎒 **GENERAL ECONOMY ITEMS & PROTECTIONS**\n";
+                    if (user_items.empty()) {
+                        desc += "*No general items owned yet. Visit `.shop` to buy items!*\n";
+                    } else {
+                        auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+
+                        for (const auto& item : user_items) {
+                            if (item.item_id == "robbery_guard") {
+                                std::string status = (item.active_until > static_cast<uint64_t>(now)) ?
+                                    ("🟢 **ACTIVE** (" + format_cooldown(item.active_until - now) + " remaining)") : "⚪ Inactive (Use `.use robbery_guard`)";
+                                desc += "• 🛡️ **Robbery Guard**: " + status + "\n";
+                            } else if (item.item_id == "reverse_card") {
+                                std::string status = (item.active_until > static_cast<uint64_t>(now)) ?
+                                    ("🟢 **ACTIVE** (" + format_cooldown(item.active_until - now) + " remaining)") : "⚪ Inactive (Use `.use reverse_card`)";
+                                desc += "• 💥 **Uno Reverse Card**: " + status + "\n";
+                            } else if (item.item_id == "item_detector") {
+                                desc += "• 🔍 **Item Detector**: **" + std::to_string(item.uses_left) + "** uses remaining (Qty: " + std::to_string(item.quantity) + ") — Use `.detect <user>`\n";
+                            } else {
+                                desc += "• 📦 `" + item.item_id + "`: Quantity **" + std::to_string(item.quantity) + "**\n";
+                            }
+                        }
+                    }
+                    desc += "\n";
+
+                    // 🎣 Section 3: Fishing Gear & Fish Bucket
+                    desc += "🎣 **FISHING GEAR & BUCKET**\n";
+                    if (fish) {
+                        desc += "• Rod: **" + fish->rod_id + "** | Bait: **" + fish->bait_id + "**\n";
+                        desc += "• Active Pet: **" + (fish->active_pet_id == "none" ? "None" : fish->active_pet_id) + "**\n";
+                        desc += "• Total Catches: **" + std::to_string(fish->total_catches) + "** | Fishing Tier: **P" + std::to_string(fish->fish_prestige) + "**\n";
+
+                        auto user_fish = g_db->get_user_fish_inventory(target_uid);
+                        int64_t fish_val = 0;
+                        for (const auto& f : user_fish) fish_val += f.value;
+                        desc += "• Fish Bucket: **" + std::to_string(user_fish.size()) + "** fish (Value: **" + std::to_string(fish_val) + "** coins)\n"
+                                "  *Quick actions:* `" + prefix_for(bot, msg) + "sell` to cash in, `" + prefix_for(bot, msg) + "bucket` to inspect.\n";
+                    } else {
+                        desc += "*No fishing data available.*\n";
+                    }
+
+                    embed.set_description(desc);
+                    payload.add_embed(embed);
+                    bot.send_message(msg.channel_id, payload);
+                });
+            },
+            "Economy"
+        });
+
+        // 17. generalshop command
+        bot.register_command({
+            "generalshop",
+            {},
+            "opens the Bronx General Economy Item Shop.",
+            "generalshop",
+            {},
+            [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>&) {
+                show_general_shop(bot, msg);
+            },
+            "Economy"
+        });
+
+        bot.register_command({
+            "shop",
+            {"store", "market"},
+            "browse and buy from every shop through one command.",
+            "shop [general|fishing|event|buy] [category/item] [quantity]",
+            {"[section]", "[category/item]", "[quantity]"},
+            [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                const std::string prefix = prefix_for(bot, msg);
+                if (args.empty() || args[0] == "help") {
+                    fluxerpp::models::MessagePayload payload;
+                    payload.content = " ";
+                    fluxerpp::models::Embed embed;
+                    embed.set_colour(0x2ECC71);
+                    embed.set_title("🛒 Bronx Shop");
+                    embed.set_description(
+                        "**Quick Browse:**\n"
+                        "• `" + prefix + "shop rods` — fishing rods & stats\n"
+                        "• `" + prefix + "shop bait` — fishing bait & luck rates\n"
+                        "• `" + prefix + "shop prestige` — prestige rods & perks\n"
+                        "• `" + prefix + "shop enchant` — rod enchants & upgrades\n"
+                        "• `" + prefix + "shop general` — shields, traps & detectors\n"
+                        "• `" + prefix + "shop event` — seasonal event rewards\n\n"
+                        "**Buy Anything:**\n"
+                        "• `" + prefix + "buy <item_id> [quantity]`\n"
+                        "• `" + prefix + "shop buy <item_id> [quantity]`\n\n"
+                        "*Examples:* `" + prefix + "buy worm 10`, `" +
+                        prefix + "buy abyssal_reaper`, `" + prefix + "buy robbery_guard`\n\n"
+                        "Your balance: `" + prefix + "balance`");
+                    payload.add_embed(embed);
+                    bot.send_message(msg.channel_id, payload);
+                    return;
+                }
+
+                std::string section = args[0];
+                std::transform(section.begin(), section.end(), section.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+
+                if (section == "general" || section == "items" || section == "economy") {
+                    if (args.size() > 1) {
+                        bot.send_message(msg.channel_id,
+                            "Use `" + prefix + "shop general` to browse general items.");
+                        return;
+                    }
+                    show_general_shop(bot, msg);
+                    return;
+                }
+
+                if (section == "fishing" || section == "fish" || section == "tackle") {
+                    std::vector<std::string> routed_args = {"shop"};
+                    if (args.size() >= 2) {
+                        if (args[1] == "buy") {
+                            if (args.size() > 4) {
+                                bot.send_message(msg.channel_id,
+                                    "Usage: `" + prefix +
+                                    "shop buy fishing <item_id> [quantity]`.");
+                                return;
+                            }
+                            routed_args = {"buy"};
+                            if (args.size() >= 3) routed_args.push_back(args[2]);
+                            if (args.size() >= 4) routed_args.push_back(args[3]);
+                        } else {
+                            if (args.size() > 2) {
+                                bot.send_message(msg.channel_id,
+                                    "Choose one category: `rods`, `prestige`, `bait`, "
+                                    "`prestige-bait`, or `enchant`.");
+                                return;
+                            }
+                            routed_args.push_back(args[1]);
+                        }
+                    }
+                    if (!route_shop_command(bot, msg, "fish", routed_args)) {
+                        bot.send_message(msg.channel_id, "Fishing shop is unavailable. Try `" + prefix + "shop fishing`.");
+                    }
+                    return;
+                }
+
+                if (section == "event" || section == "events") {
+                    std::vector<std::string> routed_args;
+                    if (args.size() > 1 && args[1] != "buy") {
+                        bot.send_message(msg.channel_id,
+                            "Use `" + prefix + "shop event` to browse event items.");
+                        return;
+                    }
+                    if (args.size() == 2 && args[1] == "buy") {
+                        bot.send_message(msg.channel_id,
+                            "Usage: `" + prefix + "shop buy event <item_id>`.");
+                        return;
+                    }
+                    if (args.size() >= 3 && args[1] == "buy" && args.size() > 3) {
+                        bot.send_message(msg.channel_id,
+                            "Event purchases are one item at a time: `" +
+                            prefix + "shop buy event <item_id>`.");
+                        return;
+                    }
+                    if (args.size() >= 3 && args[1] == "buy")
+                        routed_args = {"buy", args[2]};
+                    if (!route_shop_command(bot, msg, "event", routed_args)) {
+                        bot.send_message(msg.channel_id, "Event shop is unavailable. Try `" + prefix + "event`.");
+                    }
+                    return;
+                }
+
+                if (section == "buy") {
+                    if (args.size() < 2) {
+                        bot.send_message(msg.channel_id,
+                            "Usage: `" + prefix + "buy <item_id> [quantity]` or `" +
+                            prefix + "shop buy <item_id> [quantity]`.");
+                        return;
+                    }
+                    std::string store = args[1];
+                    std::transform(store.begin(), store.end(), store.begin(),
+                                   [](unsigned char c) { return std::tolower(c); });
+                    std::vector<std::string> routed_args;
+                    std::string command_name;
+                    if (store == "general" || store == "items" || store == "economy") {
+                        if (args.size() > 4) {
+                            bot.send_message(msg.channel_id,
+                                "Usage: `" + prefix +
+                                "shop buy general <item_id> [quantity]`.");
+                            return;
+                        }
+                        command_name = "buyitem";
+                        routed_args.assign(args.begin() + 2, args.end());
+                    } else if (store == "fishing" || store == "fish") {
+                        if (args.size() > 4) {
+                            bot.send_message(msg.channel_id,
+                                "Usage: `" + prefix +
+                                "shop buy fishing <item_id> [quantity]`.");
+                            return;
+                        }
+                        command_name = "fish";
+                        routed_args = {"buy"};
+                        routed_args.insert(routed_args.end(), args.begin() + 2, args.end());
+                    } else if (store == "event" || store == "events") {
+                        if (args.size() > 3) {
+                            bot.send_message(msg.channel_id,
+                                "Event purchases are one item at a time: `" +
+                                prefix + "shop buy event <item_id>`.");
+                            return;
+                        }
+                        command_name = "event";
+                        routed_args = {"buy"};
+                        routed_args.insert(routed_args.end(), args.begin() + 2, args.end());
+                    } else {
+                        // User typed .shop buy <item_id> [quantity] without specifying a category!
+                        std::string item_id = store;
+                        bool is_general = (item_id == "robbery_guard" || item_id == "guard" || item_id == "shield" ||
+                                           item_id == "reverse_card" || item_id == "reverse" || item_id == "uno_reverse" ||
+                                           item_id == "item_detector" || item_id == "detector" || item_id == "scanner");
+                        if (!is_general && g_db) {
+                            for (const auto& ci : g_db->get_custom_shop_items()) {
+                                if (ci.item_id == item_id) { is_general = true; break; }
+                            }
+                        }
+                        if (is_general) {
+                            command_name = "buyitem";
+                            routed_args.assign(args.begin() + 1, args.end());
+                        } else {
+                            command_name = "fish";
+                            routed_args = {"buy"};
+                            routed_args.insert(routed_args.end(), args.begin() + 1, args.end());
+                        }
+                    }
+                    if (!route_shop_command(bot, msg, command_name, routed_args)) {
+                        bot.send_message(msg.channel_id, "That shop is unavailable right now.");
+                    }
+                    return;
+                }
+
+                // Smart redirect: fishing categories used directly as section
+                // e.g. .shop rods → .shop fishing rods
+                static const std::unordered_set<std::string> fishing_cats = {
+                    "rod", "rods", "prestige", "prest", "bait", "baits",
+                    "prestige-bait", "prestigebait", "pb", "enchant", "enchants",
+                    "enchantment", "enchantments", "upgrade", "upgrades"
+                };
+                if (fishing_cats.count(section)) {
+                    std::vector<std::string> routed_args = {"shop", section};
+                    if (!route_shop_command(bot, msg, "fish", routed_args)) {
+                        bot.send_message(msg.channel_id, "Fishing shop is unavailable. Try `" + prefix + "shop fishing`.");
+                    }
+                    return;
+                }
+                // Try fuzzy match to give a helpful suggestion
+                static const std::vector<std::string> all_sections = {
+                    "general", "fishing", "event", "rods", "bait", "prestige", "enchant"
+                };
+                std::string closest;
+                size_t best = SIZE_MAX;
+                for (const auto& s : all_sections) {
+                    // Simple: check if section is a prefix of a known section
+                    if (s.rfind(section, 0) == 0 || section.rfind(s, 0) == 0) {
+                        closest = s;
+                        break;
+                    }
+                }
+                std::string hint = closest.empty()
+                    ? "Use `" + prefix + "shop` to see available sections."
+                    : "Did you mean `" + prefix + "shop " + closest + "`?";
+                bot.send_message(msg.channel_id,
+                    bronx::emj_no + " Unknown shop section `" + args[0] + "`. " + hint);
+            },
+            "Economy",
+            0,
+            0,
+            {"general", "fishing", "event", "buy"}
+        });
+
+        // 18. buyitem command
+        bot.register_command({
+            "buyitem",
+            {"buy"},
+            "buys an item from the general shop.",
+            "buy <item_id> [quantity]",
+            {"<item_id>", "[quantity]"},
+            [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (!g_db) return;
+
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id,
+                        "Usage: `" + prefix_for(bot, msg) +
+                        "shop buy general <item_id> [quantity]`.");
+                    return;
+                }
+
+                std::string item_id = args[0];
+                std::transform(item_id.begin(), item_id.end(), item_id.begin(), ::tolower);
+
+                int qty = 1;
+                if (args.size() > 1) {
+                    try {
+                        size_t parsed = 0;
+                        qty = std::stoi(args[1], &parsed);
+                        if (parsed != args[1].size() || qty <= 0) {
+                            bot.send_message(msg.channel_id,
+                                "Quantity must be a positive whole number. Usage: `" +
+                                prefix_for(bot, msg) + "shop buy general <item_id> [quantity]`.");
+                            return;
+                        }
+                    } catch (const std::exception&) {
+                        bot.send_message(msg.channel_id,
+                            "Quantity must be a positive whole number. Usage: `" +
+                            prefix_for(bot, msg) + "shop buy general <item_id> [quantity]`.");
+                        return;
+                    }
+                }
+
+                int64_t unit_cost = 0;
+                int default_uses = 0;
+                int duration = 0;
+                std::string item_name = item_id;
+
+                if (item_id == "robbery_guard" || item_id == "guard" || item_id == "shield") {
+                    item_id = "robbery_guard";
+                    item_name = "Robbery Guard";
+                    unit_cost = 5000;
+                    duration = 86400;
+                } else if (item_id == "reverse_card" || item_id == "reverse" || item_id == "uno_reverse") {
+                    item_id = "reverse_card";
+                    item_name = "Uno Reverse Card";
+                    unit_cost = 15000;
+                    duration = 86400;
+                } else if (item_id == "item_detector" || item_id == "detector" || item_id == "scanner") {
+                    item_id = "item_detector";
+                    item_name = "Item Detector";
+                    unit_cost = 2500;
+                    default_uses = 5 * qty;
+                } else {
+                    auto custom = g_db->get_custom_shop_items();
+                    bool found = false;
+                    for (const auto& ci : custom) {
+                        if (ci.item_id == item_id) {
+                            item_name = ci.name;
+                            unit_cost = ci.cost;
+                            default_uses = ci.uses_default * qty;
+                            duration = ci.duration_seconds;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        // Check if it's a fishing item (rod, bait, enchant) by routing to fish buy!
+                        std::vector<std::string> routed_args = {"buy"};
+                        routed_args.insert(routed_args.end(), args.begin(), args.end());
+                        if (route_shop_command(bot, msg, "fish", routed_args)) {
+                            return;
+                        }
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " Item `" + item_id + "` not found in shop. Browse with `" +
+                                         prefix_for(bot, msg) + "shop`.");
+                        return;
+                    }
+                }
+
+                int64_t total_cost = unit_cost * qty;
+                auto user = g_db->get_economy_user(msg.author.id);
+                if (!user || user->wallet < total_cost) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " You do not have enough coins in your wallet. Total cost: **" + std::to_string(total_cost) + "** coins.");
+                    return;
+                }
+
+                g_db->update_balances(msg.author.id, -total_cost, 0);
+                g_db->add_user_economy_item(msg.author.id, item_id, qty, default_uses, duration);
+
+                bot.send_message(msg.channel_id, "🎉 Successfully purchased **" + std::to_string(qty) + "x " + item_name + "** for **" + std::to_string(total_cost) + "** coins! Use `.inventory` to view your items.");
+            },
+            "Economy"
+        });
+
+        // 19. useitem command
+        bot.register_command({
+            "useitem",
+            {"use", "activate"},
+            "uses or activates an item from your inventory.",
+            "use <item_id>",
+            {"<item_id>"},
+            [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (!g_db) return;
+
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "invalid syntax. use `use <item_id>`.");
+                    return;
+                }
+
+                std::string item_id = args[0];
+                std::transform(item_id.begin(), item_id.end(), item_id.begin(), ::tolower);
+
+                if (item_id == "guard" || item_id == "robbery_guard" || item_id == "shield") item_id = "robbery_guard";
+                if (item_id == "reverse" || item_id == "reverse_card" || item_id == "uno_reverse") item_id = "reverse_card";
+                if (item_id == "detector" || item_id == "item_detector") item_id = "item_detector";
+
+                if (item_id == "item_detector") {
+                    bot.send_message(msg.channel_id, "🔍 To use your Item Detector, run `.detect <user>`!");
+                    return;
+                }
+
+                if (item_id == "robbery_guard") {
+                    if (g_db->activate_item(msg.author.id, "robbery_guard", 86400)) {
+                        bot.send_message(msg.channel_id, "🛡️ **Robbery Guard Activated!** You are protected against all robbery attempts for the next 24 hours.");
+                    } else {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " You do not own a Robbery Guard! Buy one in `.shop`.");
+                    }
+                    return;
+                }
+
+                if (item_id == "reverse_card") {
+                    if (g_db->activate_item(msg.author.id, "reverse_card", 86400)) {
+                        bot.send_message(msg.channel_id, "💥 **Uno Reverse Card Armed!** For the next 24 hours, anyone attempting to rob you will be counter-robbed!");
+                    } else {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " You do not own an Uno Reverse Card! Buy one in `.shop`.");
+                    }
+                    return;
+                }
+
+                bot.send_message(msg.channel_id, "" + bronx::emj_no + " Item `" + item_id + "` cannot be activated directly or is not owned.");
+            },
+            "Economy"
+        });
+
+        // 20. detect command
+        bot.register_command({
+            "detect",
+            {"detector", "scan"},
+            "uses an Item Detector to scan a target user for active protections and items.",
+            "detect <user>",
+            {"<user>"},
+            [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (!g_db) return;
+
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "invalid syntax. use `detect <user>`.");
+                    return;
+                }
+
+                std::string target_uid = resolve_user_id(args[0]);
+
+                if (!g_db->use_item_charge(msg.author.id, "item_detector")) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " You do not have an Item Detector with available uses! Purchase one in `.shop`.");
+                    return;
+                }
+
+                bool guard_active = g_db->is_item_active(target_uid, "robbery_guard");
+                bool reverse_active = g_db->is_item_active(target_uid, "reverse_card");
+                auto items = g_db->get_user_economy_items(target_uid);
+
+                fluxerpp::models::MessagePayload payload;
+                payload.content = " ";
+                fluxerpp::models::Embed embed;
+                embed.set_colour(0xF1C40F);
+                auto scanned_u = bot.get_user(target_uid);
+                embed.set_title(scanned_u ? ("🔍 Item Detector Scan — " + scanned_u->username) : "🔍 Item Detector Scan Results");
+
+                std::string desc = "**Target:** <@" + target_uid + ">\nScan completed! 1 Detector charge used.\n\n";
+
+                desc += "🛡️ **Robbery Guard Status:** " + std::string(guard_active ? "🟢 **ACTIVE (PROTECTED)**" : "🔴 Inactive") + "\n";
+                desc += "💥 **Uno Reverse Card Status:** " + std::string(reverse_active ? "🟢 **ARMED (GOTCHA TRAP ACTIVE!)**" : "🔴 Inactive") + "\n\n";
+
+                desc += "📦 **Detected Inventory:**\n";
+                if (items.empty()) {
+                    desc += "*No stored inventory items detected.*";
+                } else {
+                    for (const auto& it : items) {
+                        desc += "• `" + it.item_id + "` (Qty: " + std::to_string(it.quantity) + ")\n";
+                    }
+                }
+
+                embed.set_description(desc);
+                payload.add_embed(embed);
+                bot.send_message(msg.channel_id, payload);
             },
             "Economy"
         });

@@ -81,13 +81,29 @@ public:
             {"<@user|id>", "[reason]"},
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 std::cout << "[bronx command] handling ban...\n";
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::BanMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have the required permissions to use this command.");
+                        return;
+                    }
+                }
+
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "usage: `!ban <@user|id> [reason]`");
+                    bot.send_message(msg.channel_id, "usage: `" + msg.prefix + "ban <@user|id> [reason]`");
                     return;
                 }
 
                 std::string query = args[0];
-                std::string reason = args.size() > 1 ? args[1] : "no reason provided";
+                std::string reason = "no reason provided";
+                if (args.size() > 1) {
+                    reason = "";
+                    for (size_t i = 1; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
 
                 helpers::resolve_user(bot, msg.server_id, query, [&bot, msg, reason](fluxerpp::models::User target_user, fluxerpp::models::Member target_member, bool success) {
                     if (!success) {
@@ -107,17 +123,19 @@ public:
                                   return;
                             }
 
-                            if (!helpers::check_hierarchy(bot, msg.server_id, exec_member, target_member)) {
-                                bot.send_message(msg.channel_id, "hierarchy error: you cannot moderate this user.");
-                                return;
+                            if (!target_member.id.empty()) {
+                                if (!helpers::check_hierarchy(bot, msg.server_id, exec_member, target_member)) {
+                                    bot.send_message(msg.channel_id, "hierarchy error: you cannot moderate this user.");
+                                    return;
+                                }
+
+                                if (!helpers::check_hierarchy(bot, msg.server_id, bot_member, target_member)) {
+                                    bot.send_message(msg.channel_id, "hierarchy error: i do not have high enough position to moderate this user.");
+                                    return;
+                                }
                             }
 
-                            if (!helpers::check_hierarchy(bot, msg.server_id, bot_member, target_member)) {
-                                bot.send_message(msg.channel_id, "hierarchy error: i do not have high enough position to moderate this user.");
-                                return;
-                            }
-
-                            bot.ban_user(msg.server_id, target_user.id, reason, [&bot, msg, target_user, reason](bool action_success) {
+                            helpers::ban_user_with_links(bot, msg.server_id, target_user.id, reason, msg.author.id, [&bot, msg, target_user, reason](bool action_success) {
                                 if (action_success) {
                                     std::unordered_map<std::string, std::string> tokens = {
                                         {"{user}", "<@" + target_user.id + ">"},
@@ -127,7 +145,7 @@ public:
                                         {"{modname}", msg.author.username}
                                     };
                                     send_action_response(bot, msg.server_id, msg.channel_id, "ban", tokens, "successfully banned **" + target_user.username + "**.");
-                                    log_moderation_action(bot, msg.server_id, "Ban", msg.author.id, target_user.id, reason);
+                                    log_moderation_action(bot, msg.server_id, "Ban", msg.author.id, target_user.id, reason, "", msg.channel_id);
                                 } else {
                                     bot.send_message(msg.channel_id, "failed to ban user. do i have target permissions?");
                                 }
@@ -141,33 +159,447 @@ public:
         });
 
         bot.register_command({
-            "kick",
+            "softban",
             {},
-            "kick a member from the server.",
+            "kick a member and purge their recent messages (ban + instant unban).",
             "",
-            {"<@user|id>"},
+            {"<@user|id>", "[reason]"},
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
-                std::cout << "[bronx command] handling kick...\n";
+                std::cout << "[bronx command] handling softban...\n";
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::BanMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have permission to ban/softban members.");
+                        return;
+                    }
+                }
+
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "usage: `!kick <@user|id>`");
+                    bot.send_message(msg.channel_id, "usage: `" + msg.prefix + "softban <@user|id> [reason]`");
                     return;
                 }
 
                 std::string query = args[0];
+                std::string reason = "no reason provided";
+                if (args.size() > 1) {
+                    reason = "";
+                    for (size_t i = 1; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
 
-                helpers::resolve_user(bot, msg.server_id, query, [&bot, msg](fluxerpp::models::User target_user, fluxerpp::models::Member target_member, bool success) {
+                helpers::resolve_user(bot, msg.server_id, query, [&bot, msg, reason](fluxerpp::models::User target_user, fluxerpp::models::Member target_member, bool success) {
                     if (!success) {
-                        bot.send_message(msg.channel_id, "could not resolve target user for kick.");
+                        bot.send_message(msg.channel_id, "could not resolve target user for softban.");
                         return;
                     }
 
-                    bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, target_member, target_user](fluxerpp::models::Member exec_member, bool exec_ok) {
+                    bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, target_member, reason, target_user](fluxerpp::models::Member exec_member, bool exec_ok) {
                         if (!exec_ok) {
                             bot.send_message(msg.channel_id, "failed to verify executor member settings.");
                             return;
                         }
 
-                        bot.fetch_member(msg.server_id, bot.current_user().id, [&bot, msg, target_member, target_user, exec_member](fluxerpp::models::Member bot_member, bool bot_ok) {
+                        if (!target_member.id.empty() && !helpers::check_hierarchy(bot, msg.server_id, exec_member, target_member)) {
+                            bot.send_message(msg.channel_id, "hierarchy error: you cannot moderate this user.");
+                            return;
+                        }
+
+                        bot.ban_user(msg.server_id, target_user.id, "[Softban] " + reason, [&bot, msg, target_user, reason](bool ban_ok) {
+                            if (ban_ok) {
+                                bot.unban_user(msg.server_id, target_user.id, [&bot, msg, target_user, reason](bool) {
+                                    std::unordered_map<std::string, std::string> tokens = {
+                                        {"{user}", "<@" + target_user.id + ">"},
+                                        {"{username}", target_user.username},
+                                        {"{reason}", reason},
+                                        {"{moderator}", "<@" + msg.author.id + ">"},
+                                        {"{modname}", msg.author.username}
+                                    };
+                                    send_action_response(bot, msg.server_id, msg.channel_id, "softban", tokens, "successfully softbanned **" + target_user.username + "** (messages purged).");
+                                    log_moderation_action(bot, msg.server_id, "Softban", msg.author.id, target_user.id, reason, "", msg.channel_id);
+                                });
+                            } else {
+                                bot.send_message(msg.channel_id, "failed to softban user. do i have target permissions?");
+                            }
+                        });
+                    });
+                });
+            },
+            "Moderation",
+            fluxerpp::permissions::BanMembers
+        });
+
+        bot.register_command({
+            "unban",
+            {},
+            "unban a user from the server.",
+            "",
+            {"<@user|id>", "[reason]"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling unban...\n";
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::BanMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have the required permissions to use this command.");
+                        return;
+                    }
+                }
+
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `" + msg.prefix + "unban <@user|id> [reason]`");
+                    return;
+                }
+
+                std::string query = args[0];
+                std::string reason = "no reason provided";
+                if (args.size() > 1) {
+                    reason = "";
+                    for (size_t i = 1; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
+
+                std::thread([&bot, msg, query, reason]() {
+                    std::string target_id = query;
+                    if (target_id.rfind("<@", 0) == 0 && target_id.back() == '>') {
+                        target_id = target_id.substr(2, target_id.size() - 3);
+                    }
+
+                    bool target_resolved = false;
+                    std::string resolved_id = "";
+                    std::string resolved_name = "";
+
+                    auto is_id = [](const std::string& s) {
+                        if (s.size() != 26) return false;
+                        for (char c : s) {
+                            if (!std::isalnum(c)) return false;
+                        }
+                        return true;
+                    };
+
+                    auto to_lower = [](std::string s) {
+                        for (auto& c : s) c = std::tolower(c);
+                        return s;
+                    };
+
+                    auto bans_res = bot.rest().get_server_bans(msg.server_id);
+                    if (bans_res.success() && bans_res.body.is_array()) {
+                        std::string lower_query = to_lower(target_id);
+                        for (const auto& item : bans_res.body) {
+                            std::string banned_user_id = "";
+                            if (item.contains("id") && item["id"].is_object() && item["id"].contains("user") && item["id"]["user"].is_string()) {
+                                banned_user_id = item["id"]["user"].get<std::string>();
+                            } else if (item.contains("_id") && item["_id"].is_object() && item["_id"].contains("user") && item["_id"]["user"].is_string()) {
+                                banned_user_id = item["_id"]["user"].get<std::string>();
+                            }
+
+                            if (banned_user_id.empty()) continue;
+
+                            // 1. Exact ID match
+                            if (target_id == banned_user_id) {
+                                resolved_id = banned_user_id;
+                                if (item.contains("user") && item["user"].is_object() && item["user"].contains("username") && item["user"]["username"].is_string()) {
+                                    resolved_name = item["user"]["username"].get<std::string>();
+                                } else {
+                                    resolved_name = banned_user_id;
+                                }
+                                target_resolved = true;
+                                break;
+                            }
+
+                            // 2. Username/display name/tag match
+                            if (item.contains("user") && item["user"].is_object()) {
+                                auto u_obj = item["user"];
+                                std::string username = u_obj.contains("username") && u_obj["username"].is_string() ? u_obj["username"].get<std::string>() : "";
+                                std::string display_name = u_obj.contains("display_name") && u_obj["display_name"].is_string() ? u_obj["display_name"].get<std::string>() : "";
+                                std::string discriminator = u_obj.contains("discriminator") && u_obj["discriminator"].is_string() ? u_obj["discriminator"].get<std::string>() : "";
+
+                                std::string lower_username = to_lower(username);
+                                std::string lower_display = to_lower(display_name);
+                                std::string full_tag = username;
+                                if (!discriminator.empty()) full_tag += "#" + discriminator;
+                                std::string lower_tag = to_lower(full_tag);
+
+                                if (lower_query == lower_username || (!display_name.empty() && lower_query == lower_display) || lower_query == lower_tag) {
+                                    resolved_id = banned_user_id;
+                                    resolved_name = username.empty() ? banned_user_id : username;
+                                    target_resolved = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!target_resolved) {
+                        if (is_id(target_id)) {
+                            resolved_id = target_id;
+                            resolved_name = target_id;
+                            target_resolved = true;
+                        }
+                    }
+
+                    if (!target_resolved) {
+                        bot.send_message(msg.channel_id, "could not resolve target user to unban. please make sure the username or user ID is correct.");
+                        return;
+                    }
+
+                    helpers::unban_user_with_links(bot, msg.server_id, resolved_id, msg.author.id, [&bot, msg, resolved_id, resolved_name, reason](bool success) {
+                        if (success) {
+                            std::unordered_map<std::string, std::string> tokens = {
+                                {"{user}", "<@" + resolved_id + ">"},
+                                {"{reason}", reason},
+                                {"{moderator}", "<@" + msg.author.id + ">"},
+                                {"{modname}", msg.author.username}
+                            };
+                            send_action_response(bot, msg.server_id, msg.channel_id, "unban", tokens, "successfully unbanned **" + resolved_name + "**.");
+                            log_moderation_action(bot, msg.server_id, "Unban", msg.author.id, resolved_id, reason, "", msg.channel_id);
+                        } else {
+                            bot.send_message(msg.channel_id, "failed to unban user. make sure the user ID is correct and I have ban permissions.");
+                        }
+                    });
+                }).detach();
+            },
+            "Moderation",
+            fluxerpp::permissions::BanMembers
+        });
+
+        bot.register_command({
+            "linkban",
+            {},
+            "link or unlink banlists between servers.",
+            "",
+            {"<server_id/unlink/list/sync>", "[server_id]"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::ManageServer)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have the required permissions to use this command.");
+                        return;
+                    }
+                }
+
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id,
+                        "🔗 **Banlist Linking System**\n"
+                        "• `" + msg.prefix + "linkban <other_server_id>` — Send/accept a request to link banlists with another server. Both servers must mutually run this to activate the link.\n"
+                        "• `" + msg.prefix + "linkban unlink <other_server_id>` — Terminate a banlist link.\n"
+                        "• `" + msg.prefix + "linkban list` — List all active, pending, and incoming links in an embed.\n"
+                        "• `" + msg.prefix + "linkban sync` — Sync banlists by banning users currently banned on mutually linked servers.");
+                    return;
+                }
+
+                std::string action = args[0];
+                if (action == "list") {
+                    if (!g_db) return;
+                    std::thread([&bot, msg]() {
+                        auto linked = g_db->get_linked_ban_servers(msg.server_id);
+                        auto pending = g_db->get_pending_ban_links(msg.server_id);
+                        auto incoming = g_db->get_incoming_ban_links(msg.server_id);
+
+                        std::string desc = "";
+
+                        desc += "### 🔗 Linked Servers\n";
+                        if (linked.empty()) {
+                            desc += "*None*\n";
+                        } else {
+                            for (const auto& s_id : linked) {
+                                auto s = bot.get_server(s_id);
+                                desc += "• " + (s ? s->name : "Unknown Server") + " (`" + s_id + "`)\n";
+                            }
+                        }
+
+                        desc += "\n### ✉️ Pending Outgoing Requests\n";
+                        if (pending.empty()) {
+                            desc += "*None*\n";
+                        } else {
+                            for (const auto& s_id : pending) {
+                                auto s = bot.get_server(s_id);
+                                desc += "• " + (s ? s->name : "Unknown Server") + " (`" + s_id + "`)\n";
+                            }
+                        }
+
+                        desc += "\n### 📥 Incoming Requests\n*Run `" + msg.prefix + "linkban <server_id>` to accept.*\n";
+                        if (incoming.empty()) {
+                            desc += "*None*\n";
+                        } else {
+                            for (const auto& s_id : incoming) {
+                                auto s = bot.get_server(s_id);
+                                desc += "• " + (s ? s->name : "Unknown Server") + " (`" + s_id + "`)\n";
+                            }
+                        }
+
+                        fluxerpp::models::MessagePayload payload;
+                        nlohmann::json embed = nlohmann::json::object();
+                        embed["title"] = "🔗 Banlist Links Status";
+                        embed["colour"] = "#2ecc71"; // green
+                        embed["description"] = desc;
+                        payload.embeds.push_back(embed);
+
+                        bot.send_message(msg.channel_id, payload);
+                    }).detach();
+                    return;
+                }
+
+                if (action == "sync") {
+                    if (!g_db) return;
+                    std::thread([&bot, msg]() {
+                        bot.send_message(msg.channel_id, "🔄 **Syncing banlists...** Fetching bans from mutually linked servers.");
+
+                        auto linked = g_db->get_linked_ban_servers(msg.server_id);
+                        if (linked.empty()) {
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " This server has no mutually linked servers to sync with. Use `.linkban <server_id>` first.");
+                            return;
+                        }
+
+                        // Fetch current server's bans
+                        std::unordered_set<std::string> current_bans;
+                        auto cur_bans_res = bot.rest().get_server_bans(msg.server_id);
+                        if (cur_bans_res.success() && cur_bans_res.body.is_array()) {
+                            for (const auto& item : cur_bans_res.body) {
+                                std::string banned_user_id = "";
+                                if (item.contains("id") && item["id"].is_object() && item["id"].contains("user") && item["id"]["user"].is_string()) {
+                                    banned_user_id = item["id"]["user"].get<std::string>();
+                                } else if (item.contains("_id") && item["_id"].is_object() && item["_id"].contains("user") && item["_id"]["user"].is_string()) {
+                                    banned_user_id = item["_id"]["user"].get<std::string>();
+                                }
+                                if (!banned_user_id.empty()) {
+                                    current_bans.insert(banned_user_id);
+                                }
+                            }
+                        }
+
+                        int sync_count = 0;
+                        for (const auto& s_id : linked) {
+                            auto other_bans_res = bot.rest().get_server_bans(s_id);
+                            if (other_bans_res.success() && other_bans_res.body.is_array()) {
+                                for (const auto& item : other_bans_res.body) {
+                                    std::string banned_user_id = "";
+                                    if (item.contains("id") && item["id"].is_object() && item["id"].contains("user") && item["id"]["user"].is_string()) {
+                                        banned_user_id = item["id"]["user"].get<std::string>();
+                                    } else if (item.contains("_id") && item["_id"].is_object() && item["_id"].contains("user") && item["_id"]["user"].is_string()) {
+                                        banned_user_id = item["_id"]["user"].get<std::string>();
+                                    }
+                                    if (!banned_user_id.empty() && current_bans.find(banned_user_id) == current_bans.end()) {
+                                        bot.ban_user(msg.server_id, banned_user_id, "[Linked Ban Sync] Synchronizing banlists", [](bool){});
+                                        current_bans.insert(banned_user_id);
+                                        sync_count++;
+                                    }
+                                }
+                            }
+                        }
+
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " **Sync Complete!** Successfully banned **" + std::to_string(sync_count) + "** user(s) from linked servers to sync banlists.");
+                    }).detach();
+                    return;
+                }
+
+                if (action == "unlink") {
+                    if (args.size() < 2) {
+                        bot.send_message(msg.channel_id, "usage: `" + msg.prefix + "linkban unlink <server_id>`");
+                        return;
+                    }
+                    if (!g_db) return;
+                    std::string target_guild_id = args[1];
+                    std::thread([&bot, msg, target_guild_id]() {
+                        auto other_srv = bot.get_server(target_guild_id);
+                        std::string other_name = other_srv ? other_srv->name : target_guild_id;
+
+                        g_db->remove_ban_link(msg.server_id, target_guild_id);
+                        bot.send_message(msg.channel_id, "🔓 **Unlinked!** Banlists are no longer synchronized with **" + other_name + "**.");
+                    }).detach();
+                    return;
+                }
+
+                // Default: args[0] is the target server_id
+                std::string target_guild_id = action;
+                if (target_guild_id.size() != 26) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Invalid server ID. Please provide a valid 26-character server ID.");
+                    return;
+                }
+                if (target_guild_id == msg.server_id) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " You cannot link a server to itself.");
+                    return;
+                }
+
+                if (!g_db) return;
+                std::thread([&bot, msg, target_guild_id, server]() {
+                    auto other_srv = bot.get_server(target_guild_id);
+                    if (!other_srv) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " I am not currently in that server. Please invite me to that server first!");
+                        return;
+                    }
+
+                    g_db->add_ban_link(msg.server_id, target_guild_id);
+
+                    auto linked_servers = g_db->get_linked_ban_servers(msg.server_id);
+                    bool is_mutual = std::find(linked_servers.begin(), linked_servers.end(), target_guild_id) != linked_servers.end();
+
+                    if (is_mutual) {
+                        bot.send_message(msg.channel_id, "🔗 **Banlists are now linked!** Bans from either **" + server->name + "** or **" + other_srv->name + "** will be synchronized to the other.");
+                    } else {
+                        bot.send_message(msg.channel_id, "✉️ **Link request sent!** An administrator of **" + other_srv->name + "** must run `.linkban " + msg.server_id + "` to complete the link.");
+                    }
+                }).detach();
+            },
+            "Moderation",
+            fluxerpp::permissions::ManageServer
+        });
+
+
+        bot.register_command({
+            "kick",
+            {},
+            "kick a member from the server.",
+            "",
+            {"<@user|id>", "[reason]"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling kick...\n";
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::KickMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have the required permissions to use this command.");
+                        return;
+                    }
+                }
+
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `" + msg.prefix + "kick <@user|id> [reason]`");
+                    return;
+                }
+
+                std::string query = args[0];
+                std::string reason = "no reason provided";
+                if (args.size() > 1) {
+                    reason = "";
+                    for (size_t i = 1; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
+
+                helpers::resolve_user(bot, msg.server_id, query, [&bot, msg, reason](fluxerpp::models::User target_user, fluxerpp::models::Member target_member, bool success) {
+                    if (!success) {
+                        bot.send_message(msg.channel_id, "could not resolve target user for kick.");
+                        return;
+                    }
+                    if (target_member.id.empty()) {
+                        bot.send_message(msg.channel_id, "error: that user is not in this server.");
+                        return;
+                    }
+
+                    bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, target_member, target_user, reason](fluxerpp::models::Member exec_member, bool exec_ok) {
+                        if (!exec_ok) {
+                            bot.send_message(msg.channel_id, "failed to verify executor member settings.");
+                            return;
+                        }
+
+                        bot.fetch_member(msg.server_id, bot.current_user().id, [&bot, msg, target_member, target_user, exec_member, reason](fluxerpp::models::Member bot_member, bool bot_ok) {
                             if (!bot_ok) {
                                 bot.send_message(msg.channel_id, "failed to verify bot member settings.");
                                 return;
@@ -183,16 +615,17 @@ public:
                                 return;
                             }
 
-                            bot.kick_member(msg.server_id, target_user.id, [&bot, msg, target_user](bool action_success) {
+                            bot.kick_member(msg.server_id, target_user.id, [&bot, msg, target_user, reason](bool action_success) {
                                 if (action_success) {
                                     std::unordered_map<std::string, std::string> tokens = {
                                         {"{user}", "<@" + target_user.id + ">"},
                                         {"{username}", target_user.username},
+                                        {"{reason}", reason},
                                         {"{moderator}", "<@" + msg.author.id + ">"},
                                         {"{modname}", msg.author.username}
                                     };
                                     send_action_response(bot, msg.server_id, msg.channel_id, "kick", tokens, "successfully kicked **" + target_user.username + "**.");
-                                    log_moderation_action(bot, msg.server_id, "Kick", msg.author.id, target_user.id, "");
+                                    log_moderation_action(bot, msg.server_id, "Kick", msg.author.id, target_user.id, reason, "", msg.channel_id);
                                 } else {
                                     bot.send_message(msg.channel_id, "failed to kick user.");
                                 }
@@ -207,39 +640,60 @@ public:
 
         bot.register_command({
             "timeout",
-            {},
+            {"mute", "tempmute"},
             "timeout a member (mute/restrict).",
-            "",
-            {"<@user|id>", "<seconds>"},
+            "timeout <@user|id> <duration> [reason]",
+            {"<@user|id>", "<duration>", "[reason]"},
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 std::cout << "[bronx command] handling timeout...\n";
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::TimeoutMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have the required permissions to use this command.");
+                        return;
+                    }
+                }
+
                 if (args.size() < 2) {
-                    bot.send_message(msg.channel_id, "usage: `!timeout <@user|id> <seconds>`");
+                    bot.send_message(msg.channel_id, "usage: `" + msg.prefix + "timeout <@user|id> <duration> [reason]`");
                     return;
                 }
 
                 std::string query = args[0];
-                int seconds = 0;
-                try {
-                    seconds = std::stoi(args[1]);
-                } catch (...) {
-                    bot.send_message(msg.channel_id, "invalid duration. please specify duration in seconds.");
+                uint64_t seconds = 0;
+                size_t consumed = 0;
+                if (!helpers::parse_duration_from_args(args, 1, seconds, consumed, true)) {
+                    bot.send_message(msg.channel_id, "invalid duration. please specify a duration (e.g. `5m`, `1d`, `24h`, `5h 3s` or raw seconds).");
                     return;
                 }
 
-                helpers::resolve_user(bot, msg.server_id, query, [&bot, msg, seconds](fluxerpp::models::User target_user, fluxerpp::models::Member target_member, bool success) {
+                std::string reason = "no reason provided";
+                if (args.size() > 1 + consumed) {
+                    reason = "";
+                    for (size_t i = 1 + consumed; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
+
+                helpers::resolve_user(bot, msg.server_id, query, [&bot, msg, seconds, reason](fluxerpp::models::User target_user, fluxerpp::models::Member target_member, bool success) {
                     if (!success) {
                         bot.send_message(msg.channel_id, "could not resolve target user.");
                         return;
                     }
+                    if (target_member.id.empty()) {
+                        bot.send_message(msg.channel_id, "error: that user is not in this server.");
+                        return;
+                    }
 
-                    bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, target_member, target_user, seconds](fluxerpp::models::Member exec_member, bool exec_ok) {
+                    bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, target_member, target_user, seconds, reason](fluxerpp::models::Member exec_member, bool exec_ok) {
                         if (!exec_ok) {
                             bot.send_message(msg.channel_id, "failed to verify executor member settings.");
                             return;
                         }
 
-                        bot.fetch_member(msg.server_id, bot.current_user().id, [&bot, msg, target_member, target_user, exec_member, seconds](fluxerpp::models::Member bot_member, bool bot_ok) {
+                        bot.fetch_member(msg.server_id, bot.current_user().id, [&bot, msg, target_member, target_user, exec_member, seconds, reason](fluxerpp::models::Member bot_member, bool bot_ok) {
                             if (!bot_ok) {
                                 bot.send_message(msg.channel_id, "failed to verify bot member settings.");
                                 return;
@@ -255,21 +709,36 @@ public:
                                 return;
                             }
 
-                             std::string iso_duration = helpers::get_future_iso_timestamp(seconds);
-                             bot.timeout_member(msg.server_id, target_user.id, iso_duration, [&bot, msg, target_user, seconds](bool action_success) {
+                             std::string iso_duration = helpers::get_future_iso_timestamp(static_cast<int>(seconds));
+                             bot.timeout_member(msg.server_id, target_user.id, iso_duration, [&bot, msg, target_user, seconds, reason](bool action_success) {
                                  if (action_success) {
                                      auto now_unix = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
                                      auto expires_unix = now_unix + seconds;
+                                     log_moderation_action(bot, msg.server_id, "Timeout", msg.author.id, target_user.id, reason, "Duration: " + helpers::format_duration(seconds), msg.channel_id);
+
+                                     int count = 1;
+                                     if (g_db) {
+                                         count = g_db->get_timeout_count(msg.server_id, target_user.id);
+                                     }
+
+                                     std::string count_str;
+                                     if (count == 1) {
+                                         count_str = "this is their first timeout";
+                                     } else {
+                                         count_str = "timeout " + std::to_string(count);
+                                     }
+
                                      std::unordered_map<std::string, std::string> tokens = {
                                          {"{user}", "<@" + target_user.id + ">"},
                                          {"{username}", target_user.username},
-                                         {"{duration}", std::to_string(seconds) + " seconds"},
+                                         {"{reason}", reason},
+                                         {"{duration}", helpers::format_duration(seconds)},
                                          {"{expires}", fluxerpp::utils::format_timestamp(expires_unix, "R")},
                                          {"{moderator}", "<@" + msg.author.id + ">"},
-                                         {"{modname}", msg.author.username}
+                                         {"{modname}", msg.author.username},
+                                         {"{timeouts}", count_str}
                                      };
-                                     send_action_response(bot, msg.server_id, msg.channel_id, "timeout", tokens, "successfully timed out **" + target_user.username + "** until " + fluxerpp::utils::format_timestamp(expires_unix, "R") + ".");
-                                     log_moderation_action(bot, msg.server_id, "Timeout", msg.author.id, target_user.id, "", "Duration: " + std::to_string(seconds) + " seconds");
+                                     send_action_response(bot, msg.server_id, msg.channel_id, "timeout", tokens, "successfully timed out **" + target_user.username + "** until " + fluxerpp::utils::format_timestamp(expires_unix, "R") + " (" + count_str + ").");
                                  } else {
                                      bot.send_message(msg.channel_id, "failed to set timeout.");
                                  }
@@ -283,6 +752,81 @@ public:
         });
 
         bot.register_command({
+            "untimeout",
+            {"unmute"},
+            "removes timeout/mute from a member.",
+            "unmute <@user|id> [reason]",
+            {"<@user|id>", "[reason]"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "Usage: `" + (msg.prefix.empty() ? "." : msg.prefix) + "unmute <@user|id> [reason]`");
+                    return;
+                }
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::TimeoutMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have permission to unmute members.");
+                        return;
+                    }
+                }
+
+                std::string query = args[0];
+                std::string reason = "no reason provided";
+                if (args.size() > 1) {
+                    reason = "";
+                    for (size_t i = 1; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
+
+                helpers::resolve_user(bot, msg.server_id, query, [&bot, msg, reason](fluxerpp::models::User target_user, fluxerpp::models::Member target_member, bool success) {
+                    if (!success) {
+                        bot.send_message(msg.channel_id, "could not resolve target user.");
+                        return;
+                    }
+
+                    bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, target_member, target_user, reason](fluxerpp::models::Member exec_member, bool exec_ok) {
+                        if (!exec_ok) {
+                            bot.send_message(msg.channel_id, "failed to verify executor member settings.");
+                            return;
+                        }
+
+                        bot.fetch_member(msg.server_id, bot.current_user().id, [&bot, msg, target_member, target_user, exec_member, reason](fluxerpp::models::Member bot_member, bool bot_ok) {
+                            if (!bot_ok) {
+                                bot.send_message(msg.channel_id, "failed to verify bot member settings.");
+                                return;
+                            }
+
+                            if (!helpers::check_hierarchy(bot, msg.server_id, exec_member, target_member)) {
+                                bot.send_message(msg.channel_id, "hierarchy error: you cannot moderate this user.");
+                                return;
+                            }
+
+                            if (!helpers::check_hierarchy(bot, msg.server_id, bot_member, target_member)) {
+                                bot.send_message(msg.channel_id, "hierarchy error: i do not have high enough position to moderate this user.");
+                                return;
+                            }
+
+                            bot.remove_timeout(msg.server_id, target_user.id, [&bot, msg, target_user, reason](bool action_success) {
+                                if (action_success) {
+                                    log_moderation_action(bot, msg.server_id, "Untimeout", msg.author.id, target_user.id, reason, "Removed timeout", msg.channel_id);
+                                    bot.send_message(msg.channel_id, "🔊 Successfully unmuted **" + target_user.username + "**.");
+                                } else {
+                                    bot.send_message(msg.channel_id, "failed to remove timeout or user is not timed out.");
+                                }
+                            });
+                        });
+                    });
+                });
+            },
+            "Moderation",
+            0,
+            fluxerpp::permissions::TimeoutMembers
+        });
+
+        bot.register_command({
             "warn",
             {},
             "warn a member from the server.",
@@ -290,17 +834,37 @@ public:
             {"<@user|id>", "[reason]"},
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 std::cout << "[bronx command] handling warn...\n";
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::KickMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have the required permissions to use this command.");
+                        return;
+                    }
+                }
+
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "usage: `!warn <@user|id> [reason]`");
+                    bot.send_message(msg.channel_id, "usage: `" + msg.prefix + "warn <@user|id> [reason]`");
                     return;
                 }
 
                 std::string query = args[0];
-                std::string reason = args.size() > 1 ? args[1] : "no reason provided";
+                std::string reason = "no reason provided";
+                if (args.size() > 1) {
+                    reason = "";
+                    for (size_t i = 1; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
 
                 helpers::resolve_user(bot, msg.server_id, query, [&bot, msg, reason](fluxerpp::models::User target_user, fluxerpp::models::Member target_member, bool success) {
                     if (!success) {
                         bot.send_message(msg.channel_id, "could not resolve target user for warn.");
+                        return;
+                    }
+                    if (target_member.id.empty()) {
+                        bot.send_message(msg.channel_id, "error: that user is not in this server.");
                         return;
                     }
 
@@ -315,15 +879,78 @@ public:
                             return;
                         }
 
+                        log_moderation_action(bot, msg.server_id, "Warn", msg.author.id, target_user.id, reason, "", msg.channel_id);
+
+                        int count = 1;
+                        if (g_db) {
+                            count = g_db->get_warn_count(msg.server_id, target_user.id);
+                        }
+
+                        std::string count_str;
+                        if (count == 1) {
+                            count_str = "this is their first warning";
+                        } else {
+                            count_str = "warning " + std::to_string(count);
+                        }
+
                         std::unordered_map<std::string, std::string> tokens = {
                             {"{user}", "<@" + target_user.id + ">"},
                             {"{username}", target_user.username},
                             {"{reason}", reason},
                             {"{moderator}", "<@" + msg.author.id + ">"},
-                            {"{modname}", msg.author.username}
+                            {"{modname}", msg.author.username},
+                            {"{warns}", count_str}
                         };
-                        send_action_response(bot, msg.server_id, msg.channel_id, "warn", tokens, "successfully warned **" + target_user.username + "**.");
-                        log_moderation_action(bot, msg.server_id, "Warn", msg.author.id, target_user.id, reason);
+                        send_action_response(bot, msg.server_id, msg.channel_id, "warn", tokens, "successfully warned **" + target_user.username + "** (" + count_str + ").");
+
+                        // ── Auto-Punishment Escalation Ladder ─────────────
+                        if (count == 3) {
+                            std::string iso_duration = helpers::get_future_iso_timestamp(3600);
+                            bot.timeout_member(msg.server_id, target_user.id, iso_duration, [&bot, msg, target_user](bool to_ok) {
+                                if (to_ok) {
+                                    log_moderation_action(bot, msg.server_id, "Timeout", bot.current_user().id, target_user.id, "Auto-escalation: reached 3 warnings", "1 hour", msg.channel_id);
+                                    bot.send_message(msg.channel_id, "🔇 **Auto-Escalation**: <@" + target_user.id + "> reached 3 warnings and was placed on timeout for 1 hour.");
+                                }
+                            });
+                        } else if (count == 5) {
+                            if (g_db) {
+                                auto jcfg_opt = g_db->get_jail_config(msg.server_id);
+                                if (jcfg_opt && !jcfg_opt->jail_role_id.empty()) {
+                                    std::string orig_roles = "";
+                                    for (size_t i = 0; i < target_member.roles.size(); ++i) {
+                                        orig_roles += target_member.roles[i] + (i + 1 < target_member.roles.size() ? "," : "");
+                                    }
+                                    nlohmann::json edit_fields;
+                                    edit_fields["roles"] = { jcfg_opt->jail_role_id };
+                                    bot.rest().edit_member(msg.server_id, target_user.id, edit_fields);
+
+                                    auto now_u = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                                    Database::ActiveJail jail;
+                                    jail.server_id = msg.server_id;
+                                    jail.user_id = target_user.id;
+                                    jail.roles = orig_roles;
+                                    jail.jailed_at = now_u;
+                                    jail.expires_at = 0;
+                                    g_db->add_active_jail(jail);
+
+                                    log_moderation_action(bot, msg.server_id, "Jail", bot.current_user().id, target_user.id, "Auto-escalation: reached 5 warnings", "indefinitely", msg.channel_id);
+                                    bot.send_message(msg.channel_id, "⛓️ **Auto-Escalation**: <@" + target_user.id + "> reached 5 warnings and was sent to jail.");
+                                } else {
+                                    std::string iso_duration = helpers::get_future_iso_timestamp(86400);
+                                    bot.timeout_member(msg.server_id, target_user.id, iso_duration, [&bot, msg, target_user](bool) {
+                                        log_moderation_action(bot, msg.server_id, "Timeout", bot.current_user().id, target_user.id, "Auto-escalation: reached 5 warnings (24h timeout)", "24 hours", msg.channel_id);
+                                        bot.send_message(msg.channel_id, "🔇 **Auto-Escalation**: <@" + target_user.id + "> reached 5 warnings and was placed on timeout for 24 hours.");
+                                    });
+                                }
+                            }
+                        } else if (count >= 7) {
+                            bot.ban_user(msg.server_id, target_user.id, "Auto-escalation: reached " + std::to_string(count) + " warnings", [&bot, msg, target_user, count](bool ban_ok) {
+                                if (ban_ok) {
+                                    log_moderation_action(bot, msg.server_id, "Ban", bot.current_user().id, target_user.id, "Auto-escalation: reached " + std::to_string(count) + " warnings", "", msg.channel_id);
+                                    bot.send_message(msg.channel_id, "🔨 **Auto-Escalation**: <@" + target_user.id + "> reached " + std::to_string(count) + " warnings and has been banned.");
+                                }
+                            });
+                        }
                     });
                 });
             },
@@ -339,13 +966,23 @@ public:
             {"<@user|id/setup/role/channel>", "[args...]"},
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 std::cout << "[bronx command] handling jail...\n";
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::KickMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have the required permissions to use this command.");
+                        return;
+                    }
+                }
+
                 if (args.empty()) {
                     bot.send_message(msg.channel_id, 
                         "⚖️ **Jail System Commands:**\n"
-                        "• `.jail setup` — Automatically configure jail role and jail channel overrides.\n"
-                        "• `.jail role <@role|role_id>` — Manually set jail role.\n"
-                        "• `.jail channel <#channel|channel_id>` — Manually set jail channel.\n"
-                        "• `.jail <@user|id> [duration] [reason]` — Jail a member.");
+                        "• `" + msg.prefix + "jail setup` — Automatically configure jail role and jail channel overrides.\n"
+                        "• `" + msg.prefix + "jail role <@role|role_id>` — Manually set jail role.\n"
+                        "• `" + msg.prefix + "jail channel <#channel|channel_id>` — Manually set jail channel.\n"
+                        "• `" + msg.prefix + "jail <@user|id> [duration] [reason]` — Jail a member.");
                     return;
                 }
 
@@ -357,7 +994,7 @@ public:
                         // 1. Create role
                         auto role_res = bot.rest().create_role(msg.server_id, "Jailed");
                         if (!role_res.success()) {
-                            bot.send_message(msg.channel_id, "⚠️ Failed to create Jailed role.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to create Jailed role: " + std::to_string(role_res.status_code) + " — " + role_res.error_message());
                             return;
                         }
                         
@@ -369,14 +1006,14 @@ public:
                         }
 
                         if (jail_role_id.empty()) {
-                            bot.send_message(msg.channel_id, "⚠️ Failed to parse Jailed role ID.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to parse Jailed role ID.");
                             return;
                         }
 
                         // 2. Create channel
                         auto chan_res = bot.rest().create_channel(msg.server_id, "Text", "jail");
                         if (!chan_res.success()) {
-                            bot.send_message(msg.channel_id, "⚠️ Failed to create jail channel.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to create jail channel: " + std::to_string(chan_res.status_code) + " — " + chan_res.error_message());
                             return;
                         }
 
@@ -411,22 +1048,18 @@ public:
                             bot.cache_server(fluxerpp::models::Server::from_json(fresh_res.body));
                         }
 
-                        bot.send_message(msg.channel_id, "✅ Setup complete! Created Jailed role and <#" + jail_channel_id + "> channel with proper overrides.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Setup complete! Created Jailed role and <#" + jail_channel_id + "> channel with proper overrides.");
                     }).detach();
                     return;
                 }
 
                 if (cmd_arg == "role") {
                     if (args.size() < 2) {
-                        bot.send_message(msg.channel_id, "usage: `.jail role <@role|role_id>`");
+                        bot.send_message(msg.channel_id, "usage: `.jail role <%role|role_id>`");
                         return;
                     }
-                    std::string role_query = args[1];
-                    if (role_query.rfind("<%", 0) == 0 && role_query.back() == '>') {
-                        role_query = role_query.substr(2, role_query.size() - 3);
-                    } else if (role_query.rfind("<@&", 0) == 0 && role_query.back() == '>') {
-                        role_query = role_query.substr(3, role_query.size() - 4);
-                    }
+                    std::string role_query = helpers::clean_role_id(args[1]);
+                    if (role_query.empty()) role_query = args[1];
 
                     auto server_opt = bot.get_server(msg.server_id);
                     if (!server_opt) {
@@ -443,14 +1076,14 @@ public:
                     }
 
                     if (matched_role_id.empty()) {
-                        bot.send_message(msg.channel_id, "⚠️ Role not found on this server.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Role not found on this server.");
                         return;
                     }
 
                     auto cfg = g_db->get_jail_config(msg.server_id).value_or(Database::JailConfig{msg.server_id, "", ""});
                     cfg.jail_role_id = matched_role_id;
                     g_db->save_jail_config(cfg);
-                    bot.send_message(msg.channel_id, "✅ Jail role set to **" + role_query + "**.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Jail role set to **" + role_query + "**.");
                     return;
                 }
 
@@ -459,22 +1092,23 @@ public:
                         bot.send_message(msg.channel_id, "usage: `.jail channel <#channel|channel_id>`");
                         return;
                     }
-                    std::string chan_query = args[1];
-                    if (chan_query.rfind("<#", 0) == 0 && chan_query.back() == '>') {
-                        chan_query = chan_query.substr(2, chan_query.size() - 3);
+                    std::string chan_query = helpers::clean_channel_id(args[1]);
+                    if (chan_query.empty()) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Invalid channel provided.");
+                        return;
                     }
 
                     auto cfg = g_db->get_jail_config(msg.server_id).value_or(Database::JailConfig{msg.server_id, "", ""});
                     cfg.jail_channel_id = chan_query;
                     g_db->save_jail_config(cfg);
-                    bot.send_message(msg.channel_id, "✅ Jail channel set to <#" + chan_query + ">.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Jail channel set to <#" + chan_query + ">.");
                     return;
                 }
 
                 // Jailing member
                 auto jail_cfg_opt = g_db->get_jail_config(msg.server_id);
                 if (!jail_cfg_opt || jail_cfg_opt->jail_role_id.empty() || jail_cfg_opt->jail_channel_id.empty()) {
-                    bot.send_message(msg.channel_id, "⚠️ Jail environment is not set up on this server. Run `!jail setup` first.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Jail environment is not set up on this server. Run `!jail setup` first.");
                     return;
                 }
 
@@ -505,6 +1139,10 @@ public:
                 helpers::resolve_user(bot, msg.server_id, target_query, [&bot, msg, reason, duration, is_timed, jail_cfg_opt](fluxerpp::models::User target_user, fluxerpp::models::Member target_member, bool success) {
                     if (!success) {
                         bot.send_message(msg.channel_id, "could not resolve target user.");
+                        return;
+                    }
+                    if (target_member.id.empty()) {
+                        bot.send_message(msg.channel_id, "error: that user is not in this server.");
                         return;
                     }
 
@@ -572,7 +1210,7 @@ public:
                             send_action_response(bot, msg.server_id, msg.channel_id, "jail_invoke", tokens, "successfully jailed **" + target_user.username + "**.");
 
                             // Log mod log
-                            log_moderation_action(bot, msg.server_id, "Jail", msg.author.id, target_user.id, reason, "Duration: " + duration_str);
+                            log_moderation_action(bot, msg.server_id, "Jail", msg.author.id, target_user.id, reason, "Duration: " + duration_str, msg.channel_id);
                         }).detach();
                     });
                 });
@@ -589,17 +1227,37 @@ public:
             {"<@user|id>", "[reason]"},
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 std::cout << "[bronx command] handling unjail...\n";
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::KickMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have the required permissions to use this command.");
+                        return;
+                    }
+                }
+
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "usage: `!unjail <@user|id> [reason]`");
+                    bot.send_message(msg.channel_id, "usage: `" + msg.prefix + "unjail <@user|id> [reason]`");
                     return;
                 }
 
                 std::string target_query = args[0];
-                std::string reason = args.size() > 1 ? args[1] : "no reason provided";
+                std::string reason = "no reason provided";
+                if (args.size() > 1) {
+                    reason = "";
+                    for (size_t i = 1; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
 
                 helpers::resolve_user(bot, msg.server_id, target_query, [&bot, msg, reason](fluxerpp::models::User target_user, fluxerpp::models::Member target_member, bool success) {
                     if (!success) {
                         bot.send_message(msg.channel_id, "could not resolve target user.");
+                        return;
+                    }
+                    if (target_member.id.empty()) {
+                        bot.send_message(msg.channel_id, "error: that user is not in this server.");
                         return;
                     }
 
@@ -633,13 +1291,14 @@ public:
                         std::unordered_map<std::string, std::string> tokens = {
                             {"{user}", "<@" + target_user.id + ">"},
                             {"{username}", target_user.username},
+                            {"{reason}", reason},
                             {"{moderator}", "<@" + msg.author.id + ">"},
                             {"{modname}", msg.author.username}
                         };
                         send_action_response(bot, msg.server_id, msg.channel_id, "unjail", tokens, "successfully unjailed **" + target_user.username + "**.");
 
                         // 4. Log to modlogs
-                        log_moderation_action(bot, msg.server_id, "Unjail", msg.author.id, target_user.id, reason);
+                        log_moderation_action(bot, msg.server_id, "Unjail", msg.author.id, target_user.id, reason, "", msg.channel_id);
                     }).detach();
                 });
             },
@@ -649,38 +1308,77 @@ public:
 
         bot.register_command({
             "purge",
-            {},
-            "bulk delete messages in the channel.",
+            {"clear", "clean"},
+            "bulk delete messages in the channel with optional filters.",
             "",
-            {"[amount]", "[@user]"},
+            {"[amount]", "[@user|bots|links|files|match <phrase>]", "[amount]"},
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
-                std::cout << "[bronx command] handling purge...\n";
+                std::cout << "[bronx command] handling smart purge...\n";
+                enum class PurgeFilter { All, User, Bots, Links, Files, Match };
+                PurgeFilter filter_mode = PurgeFilter::All;
                 int amount = 10;
-                std::string user_query = "";
-                
+                std::string target_user_query = "";
+                std::string match_keyword = "";
+
                 if (!args.empty()) {
-                    try {
-                        size_t pos;
-                        int val = std::stoi(args[0], &pos);
-                        if (pos == args[0].size()) {
-                            amount = val;
-                            if (args.size() > 1) {
-                                user_query = args[1];
-                            }
-                        } else {
-                            user_query = args[0];
-                            if (args.size() > 1) {
-                                try {
-                                    amount = std::stoi(args[1]);
-                                } catch (...) {}
-                            }
-                        }
-                    } catch (...) {
-                        user_query = args[0];
+                    std::string first = args[0];
+                    std::string first_lower = first;
+                    std::transform(first_lower.begin(), first_lower.end(), first_lower.begin(), ::tolower);
+
+                    if (first_lower == "bots" || first_lower == "bot") {
+                        filter_mode = PurgeFilter::Bots;
                         if (args.size() > 1) {
-                            try {
-                                amount = std::stoi(args[1]);
-                            } catch (...) {}
+                            try { amount = std::stoi(args[1]); } catch (...) {}
+                        }
+                    } else if (first_lower == "links" || first_lower == "link" || first_lower == "urls" || first_lower == "url") {
+                        filter_mode = PurgeFilter::Links;
+                        if (args.size() > 1) {
+                            try { amount = std::stoi(args[1]); } catch (...) {}
+                        }
+                    } else if (first_lower == "files" || first_lower == "file" || first_lower == "media" || first_lower == "embeds" || first_lower == "images") {
+                        filter_mode = PurgeFilter::Files;
+                        if (args.size() > 1) {
+                            try { amount = std::stoi(args[1]); } catch (...) {}
+                        }
+                    } else if (first_lower == "match" || first_lower == "contains") {
+                        filter_mode = PurgeFilter::Match;
+                        if (args.size() > 1) {
+                            match_keyword = args[1];
+                        }
+                        if (args.size() > 2) {
+                            try { amount = std::stoi(args[2]); } catch (...) {}
+                        }
+                    } else if (first_lower == "user") {
+                        filter_mode = PurgeFilter::User;
+                        if (args.size() > 1) {
+                            target_user_query = args[1];
+                        }
+                        if (args.size() > 2) {
+                            try { amount = std::stoi(args[2]); } catch (...) {}
+                        }
+                    } else {
+                        try {
+                            size_t pos;
+                            int val = std::stoi(first, &pos);
+                            if (pos == first.size()) {
+                                amount = val;
+                                if (args.size() > 1) {
+                                    filter_mode = PurgeFilter::User;
+                                    target_user_query = args[1];
+                                }
+                            } else {
+                                filter_mode = PurgeFilter::User;
+                                target_user_query = first;
+                                if (args.size() > 1) {
+                                    try { amount = std::stoi(args[1]); } catch (...) {}
+                                }
+                            }
+                        } catch (...) {
+                            filter_mode = PurgeFilter::User;
+                            target_user_query = first;
+                            if (args.size() > 1) {
+                                try { amount = std::stoi(args[1]); } catch (...) {}
+                            }
                         }
                     }
                 }
@@ -690,11 +1388,11 @@ public:
                     return;
                 }
 
-                auto proceed_purge = [&bot, msg, amount](const std::string& target_user_id) {
+                auto proceed_purge = [&bot, msg, amount, filter_mode, match_keyword](const std::string& target_user_id) {
                     fluxerpp::models::MessageQuery query;
-                    query.limit = target_user_id.empty() ? amount : 100;
+                    query.limit = (filter_mode == PurgeFilter::All) ? amount : 100;
 
-                    std::thread([&bot, msg, amount, target_user_id, query]() {
+                    std::thread([&bot, msg, amount, filter_mode, target_user_id, match_keyword, query]() {
                         auto res = bot.rest().get_messages(msg.channel_id, query);
                         if (!res.success() || !res.body.is_array()) {
                             bot.send_message(msg.channel_id, "failed to fetch messages for purge.");
@@ -704,16 +1402,47 @@ public:
                         std::vector<std::string> ids;
                         for (const auto& item : res.body) {
                             auto m = fluxerpp::models::Message::from_json(item);
-                            if (target_user_id.empty() || m.author == target_user_id) {
+                            if (m.raw.value("pinned", false)) {
+                                continue;
+                            }
+
+                            bool matches = false;
+                            if (filter_mode == PurgeFilter::All) {
+                                matches = true;
+                            } else if (filter_mode == PurgeFilter::User) {
+                                matches = (m.author == target_user_id);
+                            } else if (filter_mode == PurgeFilter::Bots) {
+                                auto usr = bot.get_user(m.author);
+                                matches = (usr && usr->bot) || m.raw.contains("masquerade") || m.raw.contains("webhook");
+                            } else if (filter_mode == PurgeFilter::Links) {
+                                if (m.content) {
+                                    std::string s = *m.content;
+                                    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+                                    matches = (s.find("http://") != std::string::npos || s.find("https://") != std::string::npos ||
+                                               s.find("stoat.chat/") != std::string::npos || s.find("discord.gg/") != std::string::npos);
+                                }
+                            } else if (filter_mode == PurgeFilter::Files) {
+                                matches = (!m.attachments.empty() || !m.embeds.empty());
+                            } else if (filter_mode == PurgeFilter::Match) {
+                                if (m.content && !match_keyword.empty()) {
+                                    std::string s = *m.content;
+                                    std::string q = match_keyword;
+                                    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+                                    std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+                                    matches = (s.find(q) != std::string::npos);
+                                }
+                            }
+
+                            if (matches) {
                                 ids.push_back(m.id);
-                                if (!target_user_id.empty() && ids.size() >= static_cast<size_t>(amount)) {
+                                if (ids.size() >= static_cast<size_t>(amount)) {
                                     break;
                                 }
                             }
                         }
 
                         if (ids.empty()) {
-                            bot.send_message(msg.channel_id, "no messages found to delete.");
+                            bot.send_message(msg.channel_id, "no matching messages found to delete.");
                             return;
                         }
 
@@ -732,8 +1461,8 @@ public:
                     }).detach();
                 };
 
-                if (!user_query.empty()) {
-                    helpers::resolve_user(bot, msg.server_id, user_query, [proceed_purge, &bot, msg](fluxerpp::models::User user, fluxerpp::models::Member member, bool success) {
+                if (filter_mode == PurgeFilter::User && !target_user_query.empty()) {
+                    helpers::resolve_user(bot, msg.server_id, target_user_query, [proceed_purge, &bot, msg](fluxerpp::models::User user, fluxerpp::models::Member, bool success) {
                         if (!success) {
                             bot.send_message(msg.channel_id, "could not resolve target user for purge.");
                             return;
@@ -746,6 +1475,187 @@ public:
             },
             "Moderation",
             fluxerpp::permissions::ManageMessages
+        });
+
+        auto resolve_lock_target = [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args, size_t& reason_start_idx) -> std::string {
+            reason_start_idx = 0;
+            if (!args.empty()) {
+                std::string cand = helpers::clean_channel_id(args[0]);
+                if (!cand.empty() && cand.size() == 26) {
+                    auto srv = bot.get_server(msg.server_id);
+                    auto ch = bot.get_channel(cand);
+                    bool in_server = (srv && std::find(srv->channels.begin(), srv->channels.end(), cand) != srv->channels.end());
+                    if (ch || in_server) {
+                        reason_start_idx = 1;
+                        return cand;
+                    }
+                }
+            }
+            return msg.channel_id;
+        };
+
+        bot.register_command({
+            "lock",
+            {},
+            "lock a channel, preventing @everyone from sending messages.",
+            "[#channel] [reason]",
+            {"[#channel]", "[reason]"},
+            [resolve_lock_target](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling lock...\n";
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::ManageChannels) &&
+                        !bot.has_permission(*server, *mem_opt, fluxerpp::permissions::ManageServer)) {
+                        bot.send_message(msg.channel_id, "permission error: you need Manage Channels or Manage Server permission to lock a channel.");
+                        return;
+                    }
+                }
+
+                size_t reason_idx = 0;
+                std::string target_channel = resolve_lock_target(bot, msg, args, reason_idx);
+
+                std::string reason = "no reason provided";
+                if (args.size() > reason_idx) {
+                    reason = "";
+                    for (size_t i = reason_idx; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
+
+                std::thread([&bot, msg, target_channel, reason]() {
+                    int64_t deny_mask = fluxerpp::permissions::SendMessages | fluxerpp::permissions::AddReactions;
+                    auto res = bot.rest().set_channel_default_permission(target_channel, deny_mask);
+                    if (res.success()) {
+                        log_moderation_action(bot, msg.server_id, "Lock", msg.author.id, target_channel, reason, "", msg.channel_id);
+                        bot.send_message(msg.channel_id, "🔒 **Channel Locked** (<#" + target_channel + ">). Default message sending and reactions disabled.\n*Reason: " + reason + "*");
+                    } else {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to lock <#" + target_channel + ">: " + res.error_message());
+                    }
+                }).detach();
+            },
+            "Moderation",
+            fluxerpp::permissions::ManageChannels
+        });
+
+        bot.register_command({
+            "unlock",
+            {},
+            "unlock a channel, restoring message permissions.",
+            "[#channel]",
+            {"[#channel]"},
+            [resolve_lock_target](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling unlock...\n";
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, fluxerpp::permissions::ManageChannels) &&
+                        !bot.has_permission(*server, *mem_opt, fluxerpp::permissions::ManageServer)) {
+                        bot.send_message(msg.channel_id, "permission error: you need Manage Channels or Manage Server permission to unlock a channel.");
+                        return;
+                    }
+                }
+
+                size_t dummy_idx = 0;
+                std::string target_channel = resolve_lock_target(bot, msg, args, dummy_idx);
+
+                std::thread([&bot, msg, target_channel]() {
+                    auto res = bot.rest().delete_channel_permission(target_channel, "default");
+                    if (res.success()) {
+                        log_moderation_action(bot, msg.server_id, "Unlock", msg.author.id, target_channel, "", "", msg.channel_id);
+                        bot.send_message(msg.channel_id, "🔓 **Channel Unlocked** (<#" + target_channel + ">). Default permissions restored.");
+                    } else {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to unlock <#" + target_channel + ">: " + res.error_message());
+                    }
+                }).detach();
+            },
+            "Moderation",
+            fluxerpp::permissions::ManageChannels
+        });
+
+        bot.register_command({
+            "lockdown",
+            {},
+            "lock all channels across the server (emergency lockdown).",
+            "[reason]",
+            {"[reason]"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling lockdown...\n";
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                auto server = bot.get_server(msg.server_id);
+                if (!server) {
+                    bot.send_message(msg.channel_id, "failed to fetch server info.");
+                    return;
+                }
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (mem_opt && !bot.has_permission(*server, *mem_opt, fluxerpp::permissions::ManageServer)) {
+                    bot.send_message(msg.channel_id, "permission error: you need Manage Server permission to initiate a server lockdown.");
+                    return;
+                }
+
+                std::string reason = "no reason provided";
+                if (!args.empty()) {
+                    reason = "";
+                    for (size_t i = 0; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
+
+                auto channels = server->channels;
+                std::thread([&bot, msg, channels, reason]() {
+                    int64_t deny_mask = fluxerpp::permissions::SendMessages | fluxerpp::permissions::AddReactions;
+                    int locked_count = 0;
+                    for (const auto& ch_id : channels) {
+                        auto res = bot.rest().set_channel_default_permission(ch_id, deny_mask);
+                        if (res.success()) locked_count++;
+                    }
+                    log_moderation_action(bot, msg.server_id, "Lockdown", msg.author.id, msg.server_id, reason, std::to_string(locked_count) + " channels", msg.channel_id);
+                    bot.send_message(msg.channel_id, "🚨 **Server Lockdown Activated.** Locked **" + std::to_string(locked_count) + "/" + std::to_string(channels.size()) + "** channels.\n*Reason: " + reason + "*");
+                }).detach();
+            },
+            "Moderation",
+            fluxerpp::permissions::ManageServer
+        });
+
+        bot.register_command({
+            "unlockdown",
+            {},
+            "unlock all channels across the server after a lockdown.",
+            "",
+            {},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>&) {
+                std::cout << "[bronx command] handling unlockdown...\n";
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                auto server = bot.get_server(msg.server_id);
+                if (!server) {
+                    bot.send_message(msg.channel_id, "failed to fetch server info.");
+                    return;
+                }
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (mem_opt && !bot.has_permission(*server, *mem_opt, fluxerpp::permissions::ManageServer)) {
+                    bot.send_message(msg.channel_id, "permission error: you need Manage Server permission to lift a server lockdown.");
+                    return;
+                }
+
+                auto channels = server->channels;
+                std::thread([&bot, msg, channels]() {
+                    int unlocked_count = 0;
+                    for (const auto& ch_id : channels) {
+                        auto res = bot.rest().delete_channel_permission(ch_id, "default");
+                        if (res.success()) unlocked_count++;
+                    }
+                    log_moderation_action(bot, msg.server_id, "Unlockdown", msg.author.id, msg.server_id, "", std::to_string(unlocked_count) + " channels", msg.channel_id);
+                    bot.send_message(msg.channel_id, "🔓 **Server Lockdown Lifted.** Restored permissions across **" + std::to_string(unlocked_count) + "/" + std::to_string(channels.size()) + "** channels.");
+                }).detach();
+            },
+            "Moderation",
+            fluxerpp::permissions::ManageServer
         });
         bot.register_command({
             "pin",
@@ -950,13 +1860,13 @@ public:
                         "• `list` — List all customized action responses.\n\n"
                         "**Supported Actions & Tokens:**\n"
                         "• **Ban (`ban`):** `{user}`, `{username}`, `{reason}`, `{moderator}`, `{modname}`\n"
-                        "• **Kick (`kick`):** `{user}`, `{username}`, `{moderator}`, `{modname}`\n"
-                        "• **Timeout (`timeout`):** `{user}`, `{username}`, `{duration}`, `{expires}`, `{moderator}`, `{modname}`\n"
+                        "• **Kick (`kick`):** `{user}`, `{username}`, `{reason}`, `{moderator}`, `{modname}`\n"
+                        "• **Timeout (`timeout`):** `{user}`, `{username}`, `{reason}`, `{duration}`, `{expires}`, `{moderator}`, `{modname}`, `{timeouts}`\n"
                         "• **Purge (`purge`):** `{amount}`, `{moderator}`, `{modname}`\n"
-                        "• **Warn (`warn`):** `{user}`, `{username}`, `{reason}`, `{moderator}`, `{modname}`\n"
+                        "• **Warn (`warn`):** `{user}`, `{username}`, `{reason}`, `{moderator}`, `{modname}`, `{warns}`\n"
                         "• **Jail (`jail`):** `{user}`, `{username}`, `{reason}`, `{duration}`, `{moderator}`, `{modname}`\n"
                         "• **Jail Invoke (`jail_invoke`):** `{user}`, `{username}`, `{reason}`, `{duration}`, `{moderator}`, `{modname}`\n"
-                        "• **Unjail (`unjail`):** `{user}`, `{username}`, `{moderator}`, `{modname}`\n\n"
+                        "• **Unjail (`unjail`):** `{user}`, `{username}`, `{reason}`, `{moderator}`, `{modname}`\n\n"
                         "**Examples:**\n"
                         "• `" + pfx + "message ban {user} was sent into the stratosphere! Reason: {reason}`\n"
                         "• `" + pfx + "message edit ban title:🔨 Banned! color:#ff0000 description:{user} was banned by {moderator}`"
@@ -985,8 +1895,9 @@ public:
                 };
 
                 auto is_valid_action = [](const std::string& act) {
-                    return act == "ban" || act == "kick" || act == "timeout" || act == "purge" ||
-                           act == "warn" || act == "jail" || act == "unjail" || act == "jail_invoke";
+                    return act == "ban" || act == "softban" || act == "kick" || act == "timeout" || act == "purge" ||
+                           act == "warn" || act == "jail" || act == "unjail" || act == "jail_invoke" ||
+                           act == "lock" || act == "unlock";
                 };
 
                 if (sub == "list") {
@@ -1017,16 +1928,16 @@ public:
                     }
                     std::string text = (pos != std::string::npos && pos < msg.content.size()) ? msg.content.substr(pos) : "";
                     if (text.empty()) {
-                        bot.send_message(msg.channel_id, "⚠️ Please provide message text.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Please provide message text.");
                         return;
                     }
                     auto cfg = g_db->get_action_message(msg.server_id, norm_sub).value_or(Database::ActionMessageConfig{msg.server_id, norm_sub});
                     cfg.message_type = "text";
                     cfg.content = text;
                     if (g_db->save_action_message(cfg)) {
-                        bot.send_message(msg.channel_id, "✅ Custom response for `" + norm_sub + "` set successfully!");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Custom response for `" + norm_sub + "` set successfully!");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration.");
                     }
                     return;
                 }
@@ -1038,13 +1949,13 @@ public:
                     }
                     std::string act = normalize_action(args[1]);
                     if (!is_valid_action(act)) {
-                        bot.send_message(msg.channel_id, "⚠️ Invalid action type. Choose from: `ban`, `kick`, `timeout`, `purge`.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Invalid action type. Choose from: `ban`, `kick`, `timeout`, `purge`.");
                         return;
                     }
                     if (g_db->remove_action_message(msg.server_id, act)) {
-                        bot.send_message(msg.channel_id, "✅ Reset response message for `" + act + "` to default.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Reset response message for `" + act + "` to default.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to reset configuration.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to reset configuration.");
                     }
                     return;
                 }
@@ -1056,7 +1967,7 @@ public:
 
                 std::string act = normalize_action(args[1]);
                 if (!is_valid_action(act)) {
-                    bot.send_message(msg.channel_id, "⚠️ Invalid action type. Choose from: `ban`, `kick`, `timeout`, `purge`.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Invalid action type. Choose from: `ban`, `kick`, `timeout`, `purge`.");
                     return;
                 }
 
@@ -1068,15 +1979,15 @@ public:
                     std::string type = args[2];
                     std::transform(type.begin(), type.end(), type.begin(), ::tolower);
                     if (type != "text" && type != "embed") {
-                        bot.send_message(msg.channel_id, "⚠️ Type must be `text` or `embed`.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Type must be `text` or `embed`.");
                         return;
                     }
                     auto cfg = g_db->get_action_message(msg.server_id, act).value_or(Database::ActionMessageConfig{msg.server_id, act});
                     cfg.message_type = type;
                     if (g_db->save_action_message(cfg)) {
-                        bot.send_message(msg.channel_id, "✅ Response type for `" + act + "` set to **" + type + "**.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Response type for `" + act + "` set to **" + type + "**.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration.");
                     }
                     return;
                 }
@@ -1095,9 +2006,9 @@ public:
                     auto cfg = g_db->get_action_message(msg.server_id, act).value_or(Database::ActionMessageConfig{msg.server_id, act});
                     cfg.content = text;
                     if (g_db->save_action_message(cfg)) {
-                        bot.send_message(msg.channel_id, "✅ Custom text content for `" + act + "` updated successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Custom text content for `" + act + "` updated successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration.");
                     }
                     return;
                 }
@@ -1116,7 +2027,7 @@ public:
 
                     auto pairs = LoggingModule::parse_pairs(text);
                     if (pairs.empty()) {
-                        bot.send_message(msg.channel_id, "⚠️ No valid key-value pairs found. Format must be `key:value`.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " No valid key-value pairs found. Format must be `key:value`.");
                         return;
                     }
 
@@ -1139,9 +2050,9 @@ public:
 
                     cfg.embed_json = emb.dump();
                     if (g_db->save_action_message(cfg)) {
-                        bot.send_message(msg.channel_id, "✅ Custom embed fields for `" + act + "` updated successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Custom embed fields for `" + act + "` updated successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration.");
                     }
                     return;
                 }
@@ -1162,7 +2073,7 @@ public:
                     try {
                         emb = nlohmann::json::parse(text);
                     } catch (const std::exception& e) {
-                        bot.send_message(msg.channel_id, "⚠️ Invalid JSON format: " + std::string(e.what()));
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Invalid JSON format: " + std::string(e.what()));
                         return;
                     }
 
@@ -1178,9 +2089,9 @@ public:
 
                     cfg.embed_json = emb.dump();
                     if (g_db->save_action_message(cfg)) {
-                        bot.send_message(msg.channel_id, "✅ Custom embed for `" + act + "` imported successfully.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Custom embed for `" + act + "` imported successfully.");
                     } else {
-                        bot.send_message(msg.channel_id, "⚠️ Failed to save configuration.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration.");
                     }
                     return;
                 }
@@ -1193,11 +2104,11 @@ public:
 
         bot.register_command({
             "modlogs",
-            {"ml"},
+            {"ml", "warns", "warnings"},
             "view or manage moderation history for a user.",
             "modlogs <@user|id/remove> [actions/id]",
             {"<@user|id>", "[actions]"},
-            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+            [this](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (msg.server_id.empty()) {
                     bot.send_message(msg.channel_id, "this command can only be used inside a server.");
                     return;
@@ -1229,7 +2140,7 @@ public:
                         return;
                     }
                     if (g_db->delete_moderation_action(msg.server_id, id)) {
-                        bot.send_message(msg.channel_id, "✅ successfully removed modlog entry `#" + std::to_string(id) + "`.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " successfully removed modlog entry `#" + std::to_string(id) + "`.");
                     } else {
                         bot.send_message(msg.channel_id, "failed to remove modlog entry.");
                     }
@@ -1239,84 +2150,38 @@ public:
                 bool show_actions = args.size() > 1 && (args[1] == "actions" || args[1] == "action" || args[1] == "a");
 
                 helpers::resolve_user(bot, msg.server_id, query,
-                    [&bot, msg, show_actions](fluxerpp::models::User target_user, fluxerpp::models::Member, bool success) {
+                    [this, &bot, msg, show_actions](fluxerpp::models::User target_user, fluxerpp::models::Member, bool success) {
                         if (!success) {
                             bot.send_message(msg.channel_id, "could not resolve user.");
                             return;
                         }
 
-                        fluxerpp::models::MessagePayload payload;
-                        payload.content = " ";
-                        fluxerpp::models::Embed embed;
-                        embed.set_colour(0x2f3136);
-
-                        std::string display = target_user.username.empty()
-                            ? ("<@" + target_user.id + ">")
-                            : target_user.username;
-
-                        // Action emoji map
-                        auto action_emoji = [](const std::string& a) -> std::string {
-                            if (a == "Ban")     return "🔨";
-                            if (a == "Kick")    return "👢";
-                            if (a == "Timeout") return "🔇";
-                            if (a == "Warn")    return "⚠️";
-                            if (a == "Unban")   return "✅";
-                            if (a == "Jail")    return "⛓️";
-                            if (a == "Unjail")  return "🔓";
-                            return "🛡️";
-                        };
-
+                        int total_entries = 0;
                         if (!show_actions) {
-                            // Moderation history FOR the user (victim view)
-                            auto entries = g_db->get_mod_logs(msg.server_id, target_user.id, 10);
-                            embed.set_title("📋 modlogs — " + display);
-
-                            if (entries.empty()) {
-                                embed.set_description("*no moderation history for this user.*");
-                            } else {
-                                std::string desc;
-                                for (const auto& e : entries) {
-                                    desc += action_emoji(e.action) + " **" + e.action + "**";
-                                    desc += " `#" + std::to_string(e.id) + "`\n";
-                                    desc += "  **time:** " + e.created_at + "\n";
-                                    desc += "  **invoker:** <@" + e.moderator_id + ">\n";
-                                    if (!e.reason.empty())
-                                        desc += "  **reason:** " + e.reason + "\n";
-                                    if (!e.extra_details.empty())
-                                        desc += "  **details:** " + e.extra_details + "\n";
-                                    desc += "\n";
-                                }
-                                embed.set_description(desc);
-                                desc += "-# showing latest " + std::to_string(entries.size()) + " entries";
-                                embed.set_description(desc);
-                            }
+                            total_entries = g_db->get_mod_logs(msg.server_id, target_user.id, 100).size();
                         } else {
-                            // Moderation actions BY the user (moderator view)
-                            auto entries = g_db->get_mod_actions(msg.server_id, target_user.id, 10);
-                            embed.set_title("⚖️ mod actions — " + display);
-
-                            if (entries.empty()) {
-                                embed.set_description("*no moderation actions recorded for this user.*");
-                            } else {
-                                std::string desc;
-                                for (const auto& e : entries) {
-                                    desc += action_emoji(e.action) + " **" + e.action + "**";
-                                    desc += " `#" + std::to_string(e.id) + "`\n";
-                                    desc += "  **time:** " + e.created_at + "\n";
-                                    desc += "  **target:** <@" + e.target_id + ">\n";
-                                    if (!e.reason.empty())
-                                        desc += "  **reason:** " + e.reason + "\n";
-                                    if (!e.extra_details.empty())
-                                        desc += "  **details:** " + e.extra_details + "\n";
-                                    desc += "\n";
-                                }
-                                desc += "-# showing latest " + std::to_string(entries.size()) + " entries";
-                                embed.set_description(desc);
-                            }
+                            total_entries = g_db->get_mod_actions(msg.server_id, target_user.id, 100).size();
                         }
 
-                        payload.add_embed(embed);
-                        bot.send_message(msg.channel_id, payload);
+                        int max_pages = (total_entries + 4) / 5; // PAGE_SIZE = 5
+                        if (max_pages == 0) max_pages = 1;
+
+                        auto payload = render_modlogs_page(bot, msg.server_id, target_user.id, target_user.username, show_actions, 0);
+
+                        if (max_pages > 1) {
+                            bot.send_message(msg.channel_id, payload, [this, msg, target_user, show_actions, max_pages, &bot](fluxerpp::models::Message res, bool ok) {
+                                if (ok) {
+                                    {
+                                        std::lock_guard<std::mutex> lock(modlogs_mutex_);
+                                        modlogs_sessions_[res.id] = {msg.server_id, target_user.id, target_user.username, show_actions, 0, max_pages};
+                                    }
+                                    bot.rest().add_reaction(res.channel, res.id, "◀");
+                                    bot.rest().add_reaction(res.channel, res.id, "▶");
+                                }
+                            });
+                        } else {
+                            bot.send_message(msg.channel_id, payload);
+                        }
                     });
             },
             "Moderation",
@@ -1325,34 +2190,49 @@ public:
 
         bot.register_command({
             "slowmode",
-            {},
+            {"sm"},
             "set channel slowmode (0 to disable).",
             "",
             {"<seconds>", "[channel]"},
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "usage: `.slowmode <seconds> [channel]`");
+                    bot.send_message(msg.channel_id, "usage: `.slowmode <duration|off> [channel]` (e.g. `5s`, `2m`, `0`, `off`)");
                     return;
                 }
 
-
                 int seconds = 0;
-                try {
-                    seconds = std::stoi(args[0]);
-                    if (seconds < 0) {
-                        bot.send_message(msg.channel_id, "duration cannot be negative.");
+                std::string arg0 = args[0];
+                for (auto& c : arg0) c = std::tolower(c);
+                if (arg0 == "off" || arg0 == "none" || arg0 == "disable") {
+                    seconds = 0;
+                } else {
+                    int mult = 1;
+                    if (!arg0.empty() && arg0.back() == 's') {
+                        arg0.pop_back();
+                    } else if (!arg0.empty() && arg0.back() == 'm') {
+                        arg0.pop_back();
+                        mult = 60;
+                    } else if (!arg0.empty() && arg0.back() == 'h') {
+                        arg0.pop_back();
+                        mult = 3600;
+                    }
+                    try {
+                        seconds = std::stoi(arg0) * mult;
+                        if (seconds < 0) {
+                            bot.send_message(msg.channel_id, "duration cannot be negative.");
+                            return;
+                        }
+                    } catch (...) {
+                        bot.send_message(msg.channel_id, "invalid duration. specify seconds/minutes or off (e.g. `5s`, `2m`, `0`, `off`).");
                         return;
                     }
-                } catch (...) {
-                    bot.send_message(msg.channel_id, "invalid duration. please specify duration in seconds.");
-                    return;
                 }
 
                 std::string target_channel = msg.channel_id;
                 if (args.size() > 1) {
-                    target_channel = args[1];
-                    if (target_channel.rfind("<#", 0) == 0 && target_channel.back() == '>') {
-                        target_channel = target_channel.substr(2, target_channel.size() - 3);
+                    std::string cleaned = helpers::clean_channel_id(args[1]);
+                    if (!cleaned.empty()) {
+                        target_channel = cleaned;
                     }
                 }
 
@@ -1366,16 +2246,457 @@ public:
                 auto res = bot.rest().edit_channel(target_channel, patch);
                 if (res.success()) {
                     if (seconds == 0) {
-                        bot.send_message(msg.channel_id, "✅ slowmode disabled in <#" + target_channel + ">.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " slowmode disabled in <#" + target_channel + ">.");
                     } else {
-                        bot.send_message(msg.channel_id, "✅ slowmode in <#" + target_channel + "> set to **" + std::to_string(seconds) + "s**.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " slowmode in <#" + target_channel + "> set to **" + std::to_string(seconds) + "s**.");
                     }
                 } else {
-                    bot.send_message(msg.channel_id, "⚠️ failed to set slowmode. make sure I have manage channels permission.");
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to set slowmode. make sure I have manage channels permission.");
                 }
             },
             "Moderation",
             fluxerpp::permissions::ManageChannels
+        });
+
+        // --- .case <id> ---
+        bot.register_command({
+            "case",
+            {"modcase"},
+            "view details for a moderation case.",
+            "<id>",
+            {"<id>"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `.case <case_id>` (or `.case delete <case_id>`)");
+                    return;
+                }
+
+                if (args[0] == "delete" || args[0] == "del" || args[0] == "rm") {
+                    if (args.size() < 2) {
+                        bot.send_message(msg.channel_id, "usage: `.case delete <case_id>`");
+                        return;
+                    }
+                    int cid = 0;
+                    try { cid = std::stoi(args[1]); } catch (...) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid case ID.");
+                        return;
+                    }
+                    if (g_db && g_db->delete_moderation_action(msg.server_id, cid)) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Deleted moderation case **#" + std::to_string(cid) + "**.");
+                    } else {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to delete case or case not found.");
+                    }
+                    return;
+                }
+
+                int case_id = 0;
+                try {
+                    case_id = std::stoi(args[0]);
+                } catch (...) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid case ID.");
+                    return;
+                }
+
+                auto c_opt = g_db->get_moderation_case(msg.server_id, case_id);
+                if (!c_opt) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Case #" + std::to_string(case_id) + " not found.");
+                    return;
+                }
+
+                const auto& c = *c_opt;
+                fluxerpp::models::MessagePayload payload;
+                fluxerpp::models::Embed embed;
+                embed.set_title("Case #" + std::to_string(c.id) + " | " + c.action);
+
+                std::string col = "#5865F2";
+                if (c.action == "Ban" || c.action == "Softban" || c.action == "Massban") col = "#ED4245";
+                else if (c.action == "Kick") col = "#E67E22";
+                else if (c.action == "Timeout" || c.action == "Jail") col = "#FEE75C";
+                else if (c.action == "Warn") col = "#57F287";
+                embed.set_colour(col);
+
+                std::string desc = "**Offender:** <@" + c.target_id + "> (`" + c.target_id + "`)\n";
+                desc += "**Moderator:** <@" + c.moderator_id + "> (`" + c.moderator_id + "`)\n";
+                desc += "**Reason:** " + (c.reason.empty() ? "*No reason provided*" : c.reason) + "\n";
+                if (!c.extra_details.empty()) {
+                    desc += "**Details:** " + c.extra_details + "\n";
+                }
+                if (!c.channel_id.empty()) {
+                    desc += "**Channel:** <#" + c.channel_id + ">\n";
+                }
+                if (c.created_at > 0) {
+                    desc += "**Timestamp:** <t:" + std::to_string(c.created_at) + ":F> (<t:" + std::to_string(c.created_at) + ":R>)\n";
+                }
+                embed.set_description(desc);
+                payload.add_embed(embed);
+                bot.send_message(msg.channel_id, payload);
+            },
+            "Moderation",
+            fluxerpp::permissions::KickMembers
+        });
+
+        // --- .reason <id> <new_reason> ---
+        bot.register_command({
+            "reason",
+            {},
+            "update the reason for an existing moderation case.",
+            "<id> <new_reason>",
+            {"<id>", "<new_reason>"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.size() < 2) {
+                    bot.send_message(msg.channel_id, "usage: `.reason <case_id> <new_reason>`");
+                    return;
+                }
+
+                int case_id = 0;
+                try {
+                    case_id = std::stoi(args[0]);
+                } catch (...) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid case ID.");
+                    return;
+                }
+
+                auto c_opt = g_db->get_moderation_case(msg.server_id, case_id);
+                if (!c_opt) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Case #" + std::to_string(case_id) + " not found.");
+                    return;
+                }
+
+                std::string new_reason;
+                for (size_t i = 1; i < args.size(); ++i) {
+                    new_reason += args[i] + (i + 1 < args.size() ? " " : "");
+                }
+
+                if (g_db->update_moderation_case_reason(msg.server_id, case_id, new_reason)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Updated reason for **Case #" + std::to_string(case_id) + "** to: *" + new_reason + "*");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to update case reason.");
+                }
+            },
+            "Moderation",
+            fluxerpp::permissions::KickMembers
+        });
+
+        // --- .note <user> <text> ---
+        bot.register_command({
+            "note",
+            {"addnote"},
+            "add a private staff note on a user.",
+            "<user> <note>",
+            {"<user>", "<note>"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.size() < 2) {
+                    bot.send_message(msg.channel_id, "usage: `.note <user> <note_text>`");
+                    return;
+                }
+
+                std::string target_id = helpers::clean_user_id(args[0]);
+                if (target_id.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid user provided.");
+                    return;
+                }
+
+                std::string note_text;
+                for (size_t i = 1; i < args.size(); ++i) {
+                    note_text += args[i] + (i + 1 < args.size() ? " " : "");
+                }
+
+                if (g_db->add_moderation_note(msg.server_id, target_id, msg.author.id, note_text)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Staff note recorded for <@" + target_id + ">.");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to save staff note.");
+                }
+            },
+            "Moderation",
+            fluxerpp::permissions::KickMembers
+        });
+
+        // --- .notes <user> ---
+        bot.register_command({
+            "notes",
+            {},
+            "view staff notes recorded on a user.",
+            "<user>",
+            {"<user>"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `.notes <user>`");
+                    return;
+                }
+
+                std::string target_id = helpers::clean_user_id(args[0]);
+                if (target_id.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid user provided.");
+                    return;
+                }
+
+                auto notes = g_db->get_moderation_notes(msg.server_id, target_id);
+                if (notes.empty()) {
+                    bot.send_message(msg.channel_id, "ℹ️ No staff notes found for <@" + target_id + ">.");
+                    return;
+                }
+
+                fluxerpp::models::MessagePayload payload;
+                fluxerpp::models::Embed embed;
+                embed.set_title("Staff Notes — " + target_id);
+                embed.set_colour("#3498DB");
+
+                std::string desc = "Notes for <@" + target_id + "> (" + std::to_string(notes.size()) + " total):\n\n";
+                for (const auto& n : notes) {
+                    desc += "**Note #" + std::to_string(n.id) + "** — by <@" + n.moderator_id + ">";
+                    if (n.created_at > 0) {
+                        desc += " (<t:" + std::to_string(n.created_at) + ":R>)";
+                    }
+                    desc += "\n" + n.note + "\n\n";
+                    if (desc.size() > 3800) {
+                        desc += "... *(more notes truncated)*\n";
+                        break;
+                    }
+                }
+                embed.set_description(desc);
+                payload.add_embed(embed);
+                bot.send_message(msg.channel_id, payload);
+            },
+            "Moderation",
+            fluxerpp::permissions::KickMembers
+        });
+
+        // --- .delnote <id> ---
+        bot.register_command({
+            "delnote",
+            {"removenote"},
+            "delete a staff note by note ID.",
+            "<id>",
+            {"<id>"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `.delnote <note_id>`");
+                    return;
+                }
+
+                int note_id = 0;
+                try {
+                    note_id = std::stoi(args[0]);
+                } catch (...) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid note ID.");
+                    return;
+                }
+
+                if (g_db->delete_moderation_note(msg.server_id, note_id)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Deleted note **#" + std::to_string(note_id) + "**.");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to delete note or note not found.");
+                }
+            },
+            "Moderation",
+            fluxerpp::permissions::KickMembers
+        });
+
+        // --- .editnote <id> <new_text> ---
+        bot.register_command({
+            "editnote",
+            {},
+            "edit an existing staff note by note ID.",
+            "<id> <new_text>",
+            {"<id>", "<new_text>"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.size() < 2) {
+                    bot.send_message(msg.channel_id, "usage: `.editnote <note_id> <new text...>`");
+                    return;
+                }
+
+                int note_id = 0;
+                try {
+                    note_id = std::stoi(args[0]);
+                } catch (...) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid note ID.");
+                    return;
+                }
+
+                std::string new_note;
+                for (size_t i = 1; i < args.size(); ++i) {
+                    new_note += args[i] + (i + 1 < args.size() ? " " : "");
+                }
+
+                if (g_db && g_db->update_moderation_note(msg.server_id, note_id, new_note)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Updated staff note **#" + std::to_string(note_id) + "**.");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to update note or note not found.");
+                }
+            },
+            "Moderation",
+            fluxerpp::permissions::KickMembers
+        });
+
+        // --- .delcase <id> ---
+        bot.register_command({
+            "delcase",
+            {"rmcase", "deletecase"},
+            "delete a moderation case by case ID.",
+            "<id>",
+            {"<id>"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `.delcase <case_id>`");
+                    return;
+                }
+
+                int case_id = 0;
+                try {
+                    case_id = std::stoi(args[0]);
+                } catch (...) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid case ID.");
+                    return;
+                }
+
+                if (g_db && g_db->delete_moderation_action(msg.server_id, case_id)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Deleted moderation case **#" + std::to_string(case_id) + "**.");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to delete case or case not found.");
+                }
+            },
+            "Moderation",
+            fluxerpp::permissions::BanMembers
+        });
+
+        // --- .massban <id1> <id2> ... [reason: <text>] ---
+        bot.register_command({
+            "massban",
+            {},
+            "ban multiple user IDs in one sweep (up to 50 users).",
+            "<id1> <id2> ... [reason: <text>]",
+            {"<id1>..."},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `.massban <user_id_1> <user_id_2> ... [reason: <reason>]`");
+                    return;
+                }
+
+                std::vector<std::string> user_ids;
+                std::string reason = "Massban by " + msg.author.username;
+
+                bool parsing_reason = false;
+                for (const auto& arg : args) {
+                    if (!parsing_reason && (arg.rfind("reason:", 0) == 0 || arg.rfind("r:", 0) == 0)) {
+                        parsing_reason = true;
+                        size_t colon_pos = arg.find(':');
+                        std::string r_part = arg.substr(colon_pos + 1);
+                        if (!r_part.empty()) reason = r_part;
+                        else reason = "";
+                    } else if (parsing_reason) {
+                        reason += (reason.empty() ? "" : " ") + arg;
+                    } else {
+                        std::string uid = helpers::clean_user_id(arg);
+                        if (!uid.empty() && uid != bot.current_user().id && uid != msg.author.id) {
+                            user_ids.push_back(uid);
+                        }
+                    }
+                }
+
+                if (user_ids.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " no valid user IDs specified.");
+                    return;
+                }
+
+                if (user_ids.size() > 50) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " max 50 user IDs allowed per massban.");
+                    return;
+                }
+
+                int banned_count = 0;
+                int failed_count = 0;
+
+                for (const auto& uid : user_ids) {
+                    auto res = bot.rest().ban_user(msg.server_id, uid, reason);
+                    if (res.success()) {
+                        banned_count++;
+                        log_moderation_action(bot, msg.server_id, "Massban", msg.author.id, uid, reason, "", msg.channel_id);
+                    } else {
+                        failed_count++;
+                    }
+                }
+
+                fluxerpp::models::MessagePayload payload;
+                fluxerpp::models::Embed embed;
+                embed.set_title("Massban Execution");
+                embed.set_colour("#ED4245");
+                std::string desc = "Successfully banned **" + std::to_string(banned_count) + "** user(s).\n";
+                if (failed_count > 0) {
+                    desc += "Failed to ban **" + std::to_string(failed_count) + "** user(s) (hierarchy or invalid ID).\n";
+                }
+                desc += "**Reason:** " + reason;
+                embed.set_description(desc);
+                payload.add_embed(embed);
+                bot.send_message(msg.channel_id, payload);
+            },
+            "Moderation",
+            fluxerpp::permissions::BanMembers
+        });        // Register on_message_react for modlogs pagination
+        bot.on_message_react([this, &bot](const fluxerpp::events::MessageReact& e) {
+            if (e.user_id == bot.current_user().id)
+                return;
+
+            std::unique_lock<std::mutex> lock(modlogs_mutex_);
+            auto it = modlogs_sessions_.find(e.id);
+            if (it != modlogs_sessions_.end()) {
+                auto session = it->second;
+                int page = session.current_page;
+                int max_pages = session.max_pages;
+
+                bool changed = false;
+                if (e.emoji_id == "◀" || e.emoji_id == "⬅" || e.emoji_id == "◀️") {
+                    page = (page - 1 + max_pages) % max_pages;
+                    changed = true;
+                } else if (e.emoji_id == "▶" || e.emoji_id == "➡" || e.emoji_id == "▶️") {
+                    page = (page + 1) % max_pages;
+                    changed = true;
+                }
+
+                if (changed) {
+                    modlogs_sessions_[e.id].current_page = page;
+                    lock.unlock();
+
+                    auto payload = render_modlogs_page(bot, session.server_id, session.target_user_id, session.target_user_username, session.show_actions, page);
+                    bot.edit_message(e.channel_id, e.id, payload, [&bot, e](auto, bool) {
+                        bot.unreact_from_message(e.channel_id, e.id, e.emoji_id, e.user_id);
+                    });
+                } else {
+                    lock.unlock();
+                    bot.unreact_from_message(e.channel_id, e.id, e.emoji_id, e.user_id);
+                }
+            }
         });
 
         // Background thread to check for expired jails
@@ -1411,6 +2732,122 @@ public:
             }
         }).detach();
 
+    }
+private:
+    struct ModlogsSession {
+        std::string server_id;
+        std::string target_user_id;
+        std::string target_user_username;
+        bool show_actions;
+        int current_page;
+        int max_pages;
+    };
+    std::unordered_map<std::string, ModlogsSession> modlogs_sessions_;
+    std::mutex modlogs_mutex_;
+
+    fluxerpp::models::MessagePayload render_modlogs_page(fluxerpp::cluster& bot, const std::string& server_id, const std::string& target_user_id, const std::string& target_user_username, bool show_actions, int page) {
+        fluxerpp::models::MessagePayload payload;
+        payload.content = " ";
+        fluxerpp::models::Embed embed;
+        embed.set_colour(0x2f3136);
+
+        std::string display = target_user_username.empty()
+            ? ("<@" + target_user_id + ">")
+            : target_user_username;
+
+        auto action_emoji = [](const std::string& a) -> std::string {
+            if (a == "Ban")     return "🔨";
+            if (a == "Kick")    return "👢";
+            if (a == "Timeout") return "🔇";
+            if (a == "Warn")    return "" + bronx::emj_warning + "";
+            if (a == "Unban")   return "" + bronx::emj_yes + "";
+            if (a == "Jail")    return "⛓️";
+            if (a == "Unjail")  return "🔓";
+            return "🛡️";
+        };
+
+        const int PAGE_SIZE = 5;
+        if (!show_actions) {
+            auto entries = g_db->get_mod_logs(server_id, target_user_id, 100);
+            embed.set_title("📋 modlogs — " + display);
+
+            if (entries.empty()) {
+                embed.set_description("*no moderation history for this user.*");
+            } else {
+                int total_entries = entries.size();
+                int max_pages = (total_entries + PAGE_SIZE - 1) / PAGE_SIZE;
+                if (page < 0) page = 0;
+                if (page >= max_pages) page = max_pages - 1;
+
+                int start_idx = page * PAGE_SIZE;
+                int end_idx = std::min(start_idx + PAGE_SIZE, total_entries);
+
+                std::string desc;
+                desc += "| ID | Action | Invoker | Duration/Reason |\n";
+                desc += "| :--- | :--- | :--- | :--- |\n";
+                for (int i = start_idx; i < end_idx; ++i) {
+                    const auto& e = entries[i];
+                    std::string reason_val = e.reason;
+                    if (!e.extra_details.empty()) {
+                        reason_val = e.extra_details + ": " + reason_val;
+                    }
+                    if (reason_val.empty()) {
+                        reason_val = "none";
+                    }
+                    if (reason_val.size() > 50) {
+                        reason_val = reason_val.substr(0, 50) + "...";
+                    }
+
+                    desc += "| `#" + std::to_string(e.id) + "` | ";
+                    desc += action_emoji(e.action) + " " + e.action + " | ";
+                    desc += "<@" + e.moderator_id + "> | ";
+                    desc += reason_val + " |\n";
+                }
+                desc += "\n###### Page " + std::to_string(page + 1) + " of " + std::to_string(max_pages) + " | showing entries " + std::to_string(start_idx + 1) + "-" + std::to_string(end_idx) + " of " + std::to_string(total_entries);
+                embed.set_description(desc);
+            }
+        } else {
+            auto entries = g_db->get_mod_actions(server_id, target_user_id, 100);
+            embed.set_title("⚖️ mod actions — " + display);
+
+            if (entries.empty()) {
+                embed.set_description("*no moderation actions recorded for this user.*");
+            } else {
+                int total_entries = entries.size();
+                int max_pages = (total_entries + PAGE_SIZE - 1) / PAGE_SIZE;
+                if (page < 0) page = 0;
+                if (page >= max_pages) page = max_pages - 1;
+
+                int start_idx = page * PAGE_SIZE;
+                int end_idx = std::min(start_idx + PAGE_SIZE, total_entries);
+
+                std::string desc;
+                desc += "| ID | Action | Target | Duration/Reason |\n";
+                desc += "| :--- | :--- | :--- | :--- |\n";
+                for (int i = start_idx; i < end_idx; ++i) {
+                    const auto& e = entries[i];
+                    std::string reason_val = e.reason;
+                    if (!e.extra_details.empty()) {
+                        reason_val = e.extra_details + ": " + reason_val;
+                    }
+                    if (reason_val.empty()) {
+                        reason_val = "none";
+                    }
+                    if (reason_val.size() > 50) {
+                        reason_val = reason_val.substr(0, 50) + "...";
+                    }
+
+                    desc += "| `#" + std::to_string(e.id) + "` | ";
+                    desc += action_emoji(e.action) + " " + e.action + " | ";
+                    desc += "<@" + e.target_id + "> | ";
+                    desc += reason_val + " |\n";
+                }
+                desc += "\n###### Page " + std::to_string(page + 1) + " of " + std::to_string(max_pages) + " | showing entries " + std::to_string(start_idx + 1) + "-" + std::to_string(end_idx) + " of " + std::to_string(total_entries);
+                embed.set_description(desc);
+            }
+        }
+        payload.add_embed(embed);
+        return payload;
     }
 };
 

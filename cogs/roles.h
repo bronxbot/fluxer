@@ -196,7 +196,7 @@ public:
                                 }
                                 summary += "• Created role **" + name + "**" + (!role_id.empty() ? " (`" + role_id + "`)" : "") + (!color.empty() ? " with color `" + color + "`" : "") + "\n";
                             } else {
-                                summary += "• ❌ Failed to create role **" + name + "**: " + res.error_message() + "\n";
+                                summary += "• " + bronx::emj_no + " Failed to create role **" + name + "**: " + res.error_message() + "\n";
                             }
                         }
                         auto fresh_res = bot.rest().get_server(msg.server_id);
@@ -276,7 +276,7 @@ public:
                             updates_str = rem_str.substr(r.id.size());
                             break;
                         }
-                        std::string tag = "<%" + r.id + ">";
+                        std::string tag = "<@&" + r.id + ">";
                         if (rem_str.rfind(tag + " ", 0) == 0) {
                             matched = r;
                             matched_found = true;
@@ -293,13 +293,13 @@ public:
                             for (const auto& r : fresh_srv.roles) {
                                 std::string lower_rem = to_lower(rem_str);
                                 std::string lower_r = to_lower(r.name);
-                                if (lower_rem.rfind(lower_r + " ", 0) == 0 || to_lower(rem_str) == lower_r || rem_str.rfind(r.id + " ", 0) == 0 || rem_str.rfind("<%" + r.id + "> ", 0) == 0) {
+                                if (lower_rem.rfind(lower_r + " ", 0) == 0 || to_lower(rem_str) == lower_r || rem_str.rfind(r.id + " ", 0) == 0 || rem_str.rfind("<@&" + r.id + "> ", 0) == 0) {
                                     matched = r;
                                     matched_found = true;
                                     if (to_lower(rem_str) == lower_r) updates_str = "";
                                     else if (lower_rem.rfind(lower_r + " ", 0) == 0) updates_str = rem_str.substr(r.name.size());
                                     else if (rem_str.rfind(r.id + " ", 0) == 0) updates_str = rem_str.substr(r.id.size());
-                                    else updates_str = rem_str.substr(std::string("<%" + r.id + ">").size());
+                                    else updates_str = rem_str.substr(std::string("<@&" + r.id + ">").size());
                                     break;
                                 }
                             }
@@ -379,11 +379,11 @@ public:
                                     edit_fields["colour"] = old_col;
                                 }
                             } else {
-                                bot.send_message(msg.channel_id, "⚠️ Role **" + matched.name + "** currently has a solid color (`" + old_col + "`), not a gradient. Please specify multiple hex colors along with the angle, e.g., `!role edit " + matched.name + " " + angle_update + " #ff0000 #0000ff`.");
+                                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Role **" + matched.name + "** currently has a solid color (`" + old_col + "`), not a gradient. Please specify multiple hex colors along with the angle, e.g., `!role edit " + matched.name + " " + angle_update + " #ff0000 #0000ff`.");
                                 return;
                             }
                         } else {
-                            bot.send_message(msg.channel_id, "⚠️ Role **" + matched.name + "** does not currently have a color. Please specify colors along with the angle, e.g., `!role edit " + matched.name + " " + angle_update + " #ff0000 #0000ff`.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Role **" + matched.name + "** does not currently have a color. Please specify colors along with the angle, e.g., `!role edit " + matched.name + " " + angle_update + " #ff0000 #0000ff`.");
                             return;
                         }
                     }
@@ -396,9 +396,9 @@ public:
                     std::thread([&bot, msg, matched, edit_fields]() {
                         auto res = bot.rest().edit_role(msg.server_id, matched.id, edit_fields);
                         if (res.success()) {
-                            bot.send_message(msg.channel_id, "✅ Successfully updated role **" + matched.name + "**.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Successfully updated role **" + matched.name + "**.");
                         } else {
-                            bot.send_message(msg.channel_id, "❌ Failed to update role: " + res.error_message());
+                            bot.send_message(msg.channel_id, "" + bronx::emj_no + " Failed to update role: " + res.error_message());
                         }
                     }).detach();
                     return;
@@ -744,7 +744,7 @@ public:
                                 std::string target_label = res.user_mention.empty() ? "`" + res.query + "`" : res.user_mention;
                                 desc += target_label + " ,";
                                 if (!res.status_err.empty()) {
-                                    desc += " ⚠️ " + res.status_err + "\n";
+                                    desc += " " + bronx::emj_warning + " " + res.status_err + "\n";
                                 } else {
                                     desc += " no changes applied.\n";
                                 }
@@ -787,7 +787,7 @@ public:
                                         std::string target_label = res.user_mention.empty() ? "`" + res.query + "`" : res.user_mention;
                                         desc += target_label + " ,";
                                         if (!res.status_err.empty()) {
-                                            desc += " ⚠️ " + res.status_err + "\n";
+                                            desc += " " + bronx::emj_warning + " " + res.status_err + "\n";
                                         } else {
                                             bool changed = false;
                                             for (const auto& r_name : res.removed_roles) {
@@ -863,6 +863,418 @@ public:
             "Roles",
             fluxerpp::permissions::ManageRole
         });
+
+        // --- .temprole <users...> <roles...> <duration> ---
+        auto parse_multi_users_and_roles = [](
+            const fluxerpp::models::Server& srv,
+            const std::vector<std::string>& args,
+            size_t end_idx,
+            std::vector<std::string>& target_user_ids,
+            std::vector<std::pair<std::string, std::string>>& matched_roles,
+            std::string& err_msg
+        ) -> bool {
+            auto to_lower = [](std::string s) {
+                for (auto& c : s) c = std::tolower(c);
+                return s;
+            };
+
+            auto is_role_token = [&](const std::string& token) -> bool {
+                std::string cr = clean_role_query(token);
+                std::string lcr = to_lower(cr);
+                for (const auto& r : srv.roles) {
+                    if (r.id == cr || to_lower(r.name) == lcr) return true;
+                }
+                return false;
+            };
+
+            std::unordered_set<std::string> seen_users;
+            std::vector<std::string> role_tokens;
+
+            for (size_t i = 0; i < end_idx && i < args.size(); ++i) {
+                const std::string& arg = args[i];
+                if (arg.rfind("<@", 0) == 0 && arg.rfind("<@&", 0) != 0 && arg.back() == '>') {
+                    std::string uid = helpers::clean_user_id(arg);
+                    if (!uid.empty()) {
+                        if (seen_users.insert(uid).second) target_user_ids.push_back(uid);
+                        continue;
+                    }
+                }
+
+                if (arg.size() == 26 && !is_role_token(arg)) {
+                    std::string uid = helpers::clean_user_id(arg);
+                    if (!uid.empty()) {
+                        if (seen_users.insert(uid).second) target_user_ids.push_back(uid);
+                        continue;
+                    }
+                }
+
+                role_tokens.push_back(arg);
+            }
+
+            if (target_user_ids.empty()) {
+                err_msg = "" + bronx::emj_warning + " no valid user(s) specified.";
+                return false;
+            }
+            if (role_tokens.empty()) {
+                err_msg = "" + bronx::emj_warning + " no valid role(s) specified.";
+                return false;
+            }
+
+            std::string combined_roles;
+            for (size_t i = 0; i < role_tokens.size(); ++i) {
+                combined_roles += role_tokens[i] + (i + 1 < role_tokens.size() ? " " : "");
+            }
+
+            std::vector<std::string> raw_role_names;
+            if (combined_roles.find(',') != std::string::npos) {
+                std::stringstream ss(combined_roles);
+                std::string segment;
+                while (std::getline(ss, segment, ',')) {
+                    segment = clean_role_query(segment);
+                    if (!segment.empty()) raw_role_names.push_back(segment);
+                }
+            } else {
+                std::string cleaned_single = clean_role_query(combined_roles);
+                if (is_role_token(cleaned_single)) {
+                    raw_role_names.push_back(cleaned_single);
+                } else {
+                    for (const auto& tok : role_tokens) {
+                        std::string cleaned_tok = clean_role_query(tok);
+                        if (is_role_token(cleaned_tok)) {
+                            raw_role_names.push_back(cleaned_tok);
+                        }
+                    }
+                    if (raw_role_names.empty()) {
+                        raw_role_names.push_back(cleaned_single);
+                    }
+                }
+            }
+
+            std::unordered_set<std::string> matched_role_ids;
+            for (const auto& q : raw_role_names) {
+                std::string lq = to_lower(q);
+                for (const auto& r : srv.roles) {
+                    if (r.id == q || to_lower(r.name) == lq) {
+                        if (matched_role_ids.insert(r.id).second) {
+                            matched_roles.push_back({r.id, r.name});
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if (matched_roles.empty()) {
+                err_msg = "" + bronx::emj_warning + " could not find the specified role(s) in this server.";
+                return false;
+            }
+            return true;
+        };
+
+        auto fetch_member_roles_sync = [](fluxerpp::cluster& bot, const std::string& server_id, const std::string& uid, std::vector<std::string>& out_roles) -> bool {
+            if (auto m_opt = bot.get_member(server_id, uid)) {
+                out_roles = m_opt->roles;
+                return true;
+            }
+            auto m_res = bot.rest().get_server_member(server_id, uid);
+            if (m_res.success()) {
+                auto m = fluxerpp::models::Member::from_json(m_res.body);
+                out_roles = m.roles;
+                bot.cache_member(m);
+                return true;
+            }
+            return false;
+        };
+
+        bot.register_command({
+            "temprole",
+            {"temporaryrole"},
+            "assign temporary role(s) to user(s) for a specified duration.",
+            "<users...> <roles...> <duration>",
+            {"<users...>", "<roles...>", "<duration>"},
+            [parse_multi_users_and_roles, fetch_member_roles_sync](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.size() < 3) {
+                    bot.send_message(msg.channel_id, "usage: `.temprole <@users...> <roles...> <duration>`\nExamples:\n• `.temprole @user VIP 7d`\n• `.temprole @user1 @user2 VIP, Supporter 30d`");
+                    return;
+                }
+
+                std::string dur_str = args.back();
+                uint64_t dur_sec = helpers::parse_duration(dur_str);
+                if (dur_sec == 0) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid duration format (e.g. `10m`, `2h`, `7d`, `30d`).");
+                    return;
+                }
+
+                auto srv_opt = bot.get_server(msg.server_id);
+                if (!srv_opt) {
+                    bot.send_message(msg.channel_id, "failed to get server details.");
+                    return;
+                }
+
+                std::vector<std::string> target_user_ids;
+                std::vector<std::pair<std::string, std::string>> matched_roles;
+                std::string err_msg;
+                if (!parse_multi_users_and_roles(*srv_opt, args, args.size() - 1, target_user_ids, matched_roles, err_msg)) {
+                    bot.send_message(msg.channel_id, err_msg);
+                    return;
+                }
+
+                std::thread([&bot, msg, target_user_ids, matched_roles, dur_sec, fetch_member_roles_sync]() {
+                    auto now_unix = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                    uint64_t expires_at = now_unix + dur_sec;
+
+                    std::vector<std::string> updated_users;
+                    for (const auto& uid : target_user_ids) {
+                        std::vector<std::string> current_roles;
+                        if (!fetch_member_roles_sync(bot, msg.server_id, uid, current_roles)) {
+                            continue;
+                        }
+
+                        bool roles_added = false;
+                        for (const auto& [rid, rname] : matched_roles) {
+                            if (std::find(current_roles.begin(), current_roles.end(), rid) == current_roles.end()) {
+                                current_roles.push_back(rid);
+                                roles_added = true;
+                            }
+                            if (g_db) {
+                                g_db->add_temp_role(msg.server_id, uid, rid, msg.author.id, expires_at);
+                            }
+                        }
+
+                        if (roles_added) {
+                            nlohmann::json patch;
+                            patch["roles"] = current_roles;
+                            if (bot.rest().edit_member(msg.server_id, uid, patch).success()) {
+                                updated_users.push_back(uid);
+                            }
+                        } else {
+                            updated_users.push_back(uid);
+                        }
+                    }
+
+                    if (updated_users.empty()) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to resolve or update any target members.");
+                        return;
+                    }
+
+                    fluxerpp::models::MessagePayload payload;
+                    fluxerpp::models::Embed embed;
+                    embed.set_title("Temporary Role(s) Assigned");
+                    embed.set_colour("#2ECC71");
+
+                    std::string u_str;
+                    for (size_t i = 0; i < updated_users.size(); ++i) {
+                        u_str += "<@" + updated_users[i] + ">" + (i + 1 < updated_users.size() ? ", " : "");
+                    }
+
+                    std::string r_str;
+                    for (size_t i = 0; i < matched_roles.size(); ++i) {
+                        r_str += "**" + matched_roles[i].second + "**" + (i + 1 < matched_roles.size() ? ", " : "");
+                    }
+
+                    embed.set_description(
+                        "• **User(s):** " + u_str + "\n"
+                        "• **Role(s):** " + r_str + "\n"
+                        "• **Expires:** <t:" + std::to_string(expires_at) + ":F> (<t:" + std::to_string(expires_at) + ":R>)\n"
+                        "• **Duration:** `" + helpers::format_duration(dur_sec) + "`"
+                    );
+                    payload.add_embed(embed);
+                    bot.send_message(msg.channel_id, payload);
+                }).detach();
+            },
+            "Roles",
+            fluxerpp::permissions::ManageRole
+        });
+
+        // --- .untemprole <@users...> <roles...> ---
+        bot.register_command({
+            "untemprole",
+            {"deltemprole", "rmtemprole"},
+            "remove temporary role(s) early from user(s).",
+            "<users...> <roles...>",
+            {"<users...>", "<roles...>"},
+            [parse_multi_users_and_roles, fetch_member_roles_sync](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.size() < 2) {
+                    bot.send_message(msg.channel_id, "usage: `.untemprole <@users...> <roles...>`\nExamples:\n• `.untemprole @user VIP`\n• `.untemprole @user1 @user2 VIP, Supporter`");
+                    return;
+                }
+
+                auto srv_opt = bot.get_server(msg.server_id);
+                if (!srv_opt) {
+                    bot.send_message(msg.channel_id, "failed to get server details.");
+                    return;
+                }
+
+                std::vector<std::string> target_user_ids;
+                std::vector<std::pair<std::string, std::string>> matched_roles;
+                std::string err_msg;
+                if (!parse_multi_users_and_roles(*srv_opt, args, args.size(), target_user_ids, matched_roles, err_msg)) {
+                    bot.send_message(msg.channel_id, err_msg);
+                    return;
+                }
+
+                std::thread([&bot, msg, target_user_ids, matched_roles, fetch_member_roles_sync]() {
+                    std::vector<std::string> processed_users;
+                    for (const auto& uid : target_user_ids) {
+                        std::vector<std::string> current_roles;
+                        bool has_member = fetch_member_roles_sync(bot, msg.server_id, uid, current_roles);
+
+                        bool removed_db = false;
+                        bool roles_changed = false;
+                        for (const auto& [rid, rname] : matched_roles) {
+                            if (g_db && g_db->remove_user_temp_role(msg.server_id, uid, rid)) {
+                                removed_db = true;
+                            }
+                            if (has_member) {
+                                auto before = current_roles.size();
+                                current_roles.erase(
+                                    std::remove(current_roles.begin(), current_roles.end(), rid),
+                                    current_roles.end());
+                                if (current_roles.size() != before) {
+                                    roles_changed = true;
+                                }
+                            }
+                        }
+
+                        if (has_member && roles_changed) {
+                            nlohmann::json patch;
+                            patch["roles"] = current_roles;
+                            bot.rest().edit_member(msg.server_id, uid, patch);
+                        }
+                        if (has_member || removed_db) {
+                            processed_users.push_back(uid);
+                        }
+                    }
+
+                    if (processed_users.empty()) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to resolve or update any target members.");
+                        return;
+                    }
+
+                    fluxerpp::models::MessagePayload payload;
+                    fluxerpp::models::Embed embed;
+                    embed.set_title("Temporary Role(s) Removed");
+                    embed.set_colour("#E67E22");
+
+                    std::string u_str;
+                    for (size_t i = 0; i < processed_users.size(); ++i) {
+                        u_str += "<@" + processed_users[i] + ">" + (i + 1 < processed_users.size() ? ", " : "");
+                    }
+
+                    std::string r_str;
+                    for (size_t i = 0; i < matched_roles.size(); ++i) {
+                        r_str += "**" + matched_roles[i].second + "**" + (i + 1 < matched_roles.size() ? ", " : "");
+                    }
+
+                    embed.set_description(
+                        "• **User(s):** " + u_str + "\n"
+                        "• **Removed Role(s):** " + r_str
+                    );
+                    payload.add_embed(embed);
+                    bot.send_message(msg.channel_id, payload);
+                }).detach();
+            },
+            "Roles",
+            fluxerpp::permissions::ManageRole
+        });
+
+        // --- .temproles [@user] ---
+        bot.register_command({
+            "temproles",
+            {"activetemproles"},
+            "view active temporary roles in this server.",
+            "[@user]",
+            {"[@user]"},
+            [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (!g_db) {
+                    bot.send_message(msg.channel_id, "database unavailable.");
+                    return;
+                }
+
+                std::string target_user;
+                if (!args.empty()) {
+                    target_user = helpers::clean_user_id(args[0]);
+                }
+
+                auto list = g_db->get_active_temp_roles(msg.server_id, target_user);
+                if (list.empty()) {
+                    bot.send_message(msg.channel_id, "ℹ️ No active temporary roles found.");
+                    return;
+                }
+
+                auto srv_opt = bot.get_server(msg.server_id);
+
+                fluxerpp::models::MessagePayload payload;
+                fluxerpp::models::Embed embed;
+                embed.set_title("Active Temporary Roles (" + std::to_string(list.size()) + ")");
+                embed.set_colour("#3498DB");
+
+                std::string desc;
+                for (size_t i = 0; i < list.size(); ++i) {
+                    const auto& tr = list[i];
+                    std::string rname = tr.role_id;
+                    if (srv_opt) {
+                        for (const auto& r : srv_opt->roles) {
+                            if (r.id == tr.role_id) {
+                                rname = r.name;
+                                break;
+                            }
+                        }
+                    }
+
+                    desc += "**" + std::to_string(i + 1) + ".** <@" + tr.user_id + "> — **" + rname + "**\n";
+                    desc += "Expires: <t:" + std::to_string(tr.expires_at) + ":R> (assigned by <@" + tr.assigned_by + ">)\n\n";
+                    if (desc.size() > 3500) {
+                        desc += "... *(more truncated)*\n";
+                        break;
+                    }
+                }
+                embed.set_description(desc);
+                payload.add_embed(embed);
+                bot.send_message(msg.channel_id, payload);
+            },
+            "Roles",
+            fluxerpp::permissions::ManageRole
+        });
+
+        // --- Start background temp roles expiration worker loop ---
+        std::thread([&bot]() {
+            while (true) {
+                std::this_thread::sleep_for(std::chrono::seconds(10));
+                if (!g_db) continue;
+                auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                auto expired = g_db->get_expired_temp_roles(now);
+                for (const auto& tr : expired) {
+                    bot.fetch_member(tr.server_id, tr.user_id, [&bot, tr](fluxerpp::models::Member m, bool ok) {
+                        if (ok) {
+                            std::vector<std::string> new_roles;
+                            for (const auto& r : m.roles) {
+                                if (r != tr.role_id) new_roles.push_back(r);
+                            }
+                            nlohmann::json patch;
+                            patch["roles"] = new_roles;
+                            bot.rest().edit_member(tr.server_id, tr.user_id, patch);
+                        }
+                        if (g_db) {
+                            g_db->remove_temp_role(tr.id);
+                        }
+                    });
+                }
+            }
+        }).detach();
     }
 };
 

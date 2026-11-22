@@ -11,7 +11,9 @@
 #include <thread>
 #include <functional>
 #include <cstdlib>
+#include <optional>
 #include <algorithm>
+#include <unordered_set>
 #include "fluxerpp/cluster.h"
 #include "fluxerpp/utils/ulid.h"
 #include <nlohmann/json.hpp>
@@ -24,9 +26,80 @@ namespace bronx {
 
 namespace bronx::helpers {
 
+inline std::string shell_escape(const std::string& str) {
+    std::string res;
+    res += "'";
+    for (char c : str) {
+        if (c == '\'') {
+            res += "'\\''";
+        } else {
+            res += c;
+        }
+    }
+    res += "'";
+    return res;
+}
+
+inline std::optional<uint64_t> get_unit_multiplier(std::string unit) {
+    for (char &c : unit) c = std::tolower(c);
+    if (unit == "s" || unit == "sec" || unit == "second" || unit == "seconds") return 1;
+    if (unit == "m" || unit == "min" || unit == "mins" || unit == "minute" || unit == "minutes") return 60;
+    if (unit == "h" || unit == "hr" || unit == "hrs" || unit == "hour" || unit == "hours") return 3600;
+    if (unit == "d" || unit == "day" || unit == "days") return 86400;
+    if (unit == "w" || unit == "wk" || unit == "wks" || unit == "week" || unit == "weeks") return 604800;
+    if (unit == "mo" || unit == "month" || unit == "months") return 2592000;
+    if (unit == "y" || unit == "yr" || unit == "yrs" || unit == "year" || unit == "years") return 31536000;
+    return std::nullopt;
+}
+
+inline bool parse_compound_token(const std::string& token, uint64_t& out_seconds, bool& out_has_unit) {
+    uint64_t total = 0;
+    bool has_unit = false;
+    std::string current_num = "";
+    
+    for (size_t i = 0; i < token.size(); ++i) {
+        char c = token[i];
+        if (std::isdigit(c)) {
+            current_num += c;
+        } else {
+            if (current_num.empty()) return false;
+            
+            std::string unit = "";
+            while (i < token.size() && std::isalpha(token[i])) {
+                unit += token[i];
+                i++;
+            }
+            i--;
+            
+            auto mult = get_unit_multiplier(unit);
+            if (!mult) return false;
+            
+            uint64_t val = 0;
+            try { val = std::stoull(current_num); } catch (...) { return false; }
+            total += val * (*mult);
+            has_unit = true;
+            current_num = "";
+        }
+    }
+    
+    if (!current_num.empty()) {
+        if (has_unit) return false; // Ambiguous trailing number without unit
+        uint64_t val = 0;
+        try { val = std::stoull(current_num); } catch (...) { return false; }
+        total = val;
+    }
+    
+    if (!has_unit && current_num.empty()) return false;
+    
+    out_seconds = total;
+    out_has_unit = has_unit;
+    return true;
+}
+
 inline uint64_t parse_duration(const std::string& input) {
     uint64_t total_seconds = 0;
     std::string current_num = "";
+    
     for (size_t i = 0; i < input.size(); ++i) {
         char c = input[i];
         if (std::isdigit(c)) {
@@ -34,34 +107,154 @@ inline uint64_t parse_duration(const std::string& input) {
         } else {
             if (current_num.empty()) continue;
             
-            std::string unit = "";
-            while (i < input.size() && std::isalpha(input[i])) {
-                unit += std::tolower(input[i]);
-                i++;
+            // Skip spaces/commas between number and unit
+            size_t temp_i = i;
+            while (temp_i < input.size() && (std::isspace(input[temp_i]) || input[temp_i] == ',')) {
+                temp_i++;
             }
-            i--; 
             
-            uint64_t val = 0;
-            try { val = std::stoull(current_num); } catch (...) { return 0; }
+            std::string unit = "";
+            while (temp_i < input.size() && std::isalpha(input[temp_i])) {
+                unit += std::tolower(input[temp_i]);
+                temp_i++;
+            }
             
-            if (unit == "s" || unit == "sec" || unit == "seconds") total_seconds += val;
-            else if (unit == "m" || unit == "min" || unit == "minutes") total_seconds += val * 60;
-            else if (unit == "h" || unit == "hr" || unit == "hours") total_seconds += val * 3600;
-            else if (unit == "d" || unit == "day" || unit == "days") total_seconds += val * 86400;
-            else if (unit == "w" || unit == "wk" || unit == "weeks") total_seconds += val * 604800;
-            else if (unit == "mo" || unit == "month" || unit == "months") total_seconds += val * 2592000;
-            else if (unit == "y" || unit == "yr" || unit == "years") total_seconds += val * 31536000;
-            else return 0;
-            
-            current_num = "";
+            // Check if it's a valid unit
+            auto mult = get_unit_multiplier(unit);
+            if (mult) {
+                uint64_t val = 0;
+                try { val = std::stoull(current_num); } catch (...) { return 0; }
+                total_seconds += val * (*mult);
+                current_num = "";
+                i = temp_i - 1; // Advance loop index to the end of the unit
+            } else {
+                // Check if it's just trailing whitespace/separator at the end
+                bool is_end_of_string = true;
+                for (size_t k = temp_i; k < input.size(); ++k) {
+                    if (!std::isspace(input[k]) && input[k] != ',') {
+                        is_end_of_string = false;
+                        break;
+                    }
+                }
+                if (is_end_of_string) {
+                    uint64_t val = 0;
+                    try { val = std::stoull(current_num); } catch (...) { return 0; }
+                    total_seconds += val * 60; // default to minutes for compatibility with old helpers::parse_duration
+                    current_num = "";
+                    break;
+                } else {
+                    return 0; // Number followed by invalid unit or non-unit words
+                }
+            }
         }
     }
     
-    if (total_seconds == 0 && !current_num.empty()) {
-        try { return std::stoull(current_num) * 60; } catch (...) { return 0; }
+    if (!current_num.empty()) {
+        uint64_t val = 0;
+        try { val = std::stoull(current_num); } catch (...) { return 0; }
+        total_seconds += val * 60; // default to minutes for compatibility with old helpers::parse_duration
     }
     
     return total_seconds;
+}
+
+inline bool parse_duration_from_args(const std::vector<std::string>& args, size_t start_idx, uint64_t& out_seconds, size_t& out_consumed, bool default_to_seconds = false) {
+    uint64_t total_seconds = 0;
+    bool has_any_unit = false;
+    size_t i = start_idx;
+    bool parsed_something = false;
+    
+    while (i < args.size()) {
+        std::string token = args[i];
+        
+        // Handle "and" / "&" connector
+        if (parsed_something && (token == "and" || token == "&")) {
+            if (i + 1 < args.size()) {
+                std::string next_token = args[i + 1];
+                if (!next_token.empty() && std::isdigit(next_token[0])) {
+                    i++;
+                    continue;
+                }
+            }
+            break;
+        }
+        
+        // Check if token contains any digits.
+        bool has_digit = false;
+        for (char c : token) {
+            if (std::isdigit(c)) {
+                has_digit = true;
+                break;
+            }
+        }
+        
+        if (!has_digit) {
+            break;
+        }
+        
+        uint64_t token_secs = 0;
+        bool token_has_unit = false;
+        
+        if (!parse_compound_token(token, token_secs, token_has_unit)) {
+            break;
+        }
+        
+        if (!token_has_unit) {
+            // Raw number. Check if the next token is a unit.
+            if (i + 1 < args.size()) {
+                std::string next_token = args[i + 1];
+                auto mult = get_unit_multiplier(next_token);
+                if (mult) {
+                    total_seconds += token_secs * (*mult);
+                    has_any_unit = true;
+                    parsed_something = true;
+                    i += 2;
+                    continue;
+                }
+            }
+            
+            // Raw number not followed by unit
+            if (!parsed_something) {
+                total_seconds += token_secs;
+                parsed_something = true;
+                i++;
+                continue;
+            } else {
+                break;
+            }
+        } else {
+            total_seconds += token_secs;
+            has_any_unit = true;
+            parsed_something = true;
+            i++;
+            continue;
+        }
+    }
+    
+    if (!parsed_something) {
+        return false;
+    }
+    
+    if (!has_any_unit && !default_to_seconds) {
+        total_seconds *= 60;
+    }
+    
+    out_seconds = total_seconds;
+    out_consumed = i - start_idx;
+    return true;
+}
+
+inline std::string format_duration(uint64_t secs) {
+    if (secs == 0) return "0s";
+    uint64_t d = secs / 86400, h = (secs % 86400) / 3600,
+             m = (secs % 3600) / 60, s = secs % 60;
+    std::string r;
+    if (d) r += std::to_string(d) + "d ";
+    if (h) r += std::to_string(h) + "h ";
+    if (m) r += std::to_string(m) + "m ";
+    if (s) r += std::to_string(s) + "s ";
+    if (!r.empty()) r.pop_back();
+    return r;
 }
 
 inline std::string format_epoch_ms(uint64_t ms) {
@@ -102,6 +295,8 @@ struct PaginationSession {
     int max_pages = 3;
     std::string user_id;
     std::string type = "general";
+    std::string target_query = "";
+    std::string server_id = "";
 };
 
 inline std::map<std::string, PaginationSession> g_pages;
@@ -156,18 +351,26 @@ inline std::string get_future_iso_timestamp(int offset_seconds) {
     return out_str;
 }
 
+inline std::string clean_channel_id(const std::string& input) {
+    return fluxerpp::utils::extract_ulid(input);
+}
+
+inline std::string clean_user_id(const std::string& input) {
+    return fluxerpp::utils::extract_ulid(input);
+}
+
+inline std::string clean_role_id(const std::string& input) {
+    return fluxerpp::utils::extract_ulid(input);
+}
+
 inline void resolve_user(fluxerpp::cluster& bot, const std::string& server_id, const std::string& query, std::function<void(fluxerpp::models::User, fluxerpp::models::Member, bool)> callback) {
     if (query.empty()) {
         callback({}, {}, false);
         return;
     }
 
-    std::string target_id = query;
-    if (target_id.rfind("<@", 0) == 0 && target_id.back() == '>') {
-        target_id = target_id.substr(2, target_id.size() - 3);
-    }
-
-    if (target_id.size() == 26 && target_id.find_first_not_of("0123456789ABCDEFGHJKMNPQRSTVWXYZabcdefghjkmnpqrstvwxyz") == std::string::npos) {
+    std::string target_id = clean_user_id(query);
+    if (!target_id.empty()) {
         bot.fetch_user(target_id, [&bot, server_id, callback](fluxerpp::models::User user, bool success) {
             if (!success) {
                 callback({}, {}, false);
@@ -175,7 +378,29 @@ inline void resolve_user(fluxerpp::cluster& bot, const std::string& server_id, c
             }
             if (!server_id.empty()) {
                 bot.fetch_member(server_id, user.id, [user, callback](fluxerpp::models::Member member, bool success_mem) {
-                    callback(user, member, success_mem);
+                    callback(user, member, true);
+                });
+            } else {
+                callback(user, {}, true);
+            }
+        });
+        return;
+    }
+
+    target_id = query;
+    if (target_id.rfind("<@", 0) == 0 && target_id.back() == '>') {
+        target_id = target_id.substr(2, target_id.size() - 3);
+    }
+
+    if (target_id.size() == 26 && fluxerpp::utils::is_valid_ulid(target_id)) {
+        bot.fetch_user(target_id, [&bot, server_id, callback](fluxerpp::models::User user, bool success) {
+            if (!success) {
+                callback({}, {}, false);
+                return;
+            }
+            if (!server_id.empty()) {
+                bot.fetch_member(server_id, user.id, [user, callback](fluxerpp::models::Member member, bool success_mem) {
+                    callback(user, member, true);
                 });
             } else {
                 callback(user, {}, true);
@@ -280,24 +505,132 @@ inline void resolve_user(fluxerpp::cluster& bot, const std::string& server_id, c
     }).detach();
 }
 
+inline bool is_valid_image_file(const std::string& path) {
+    if (!std::filesystem::exists(path) || std::filesystem::file_size(path) < 8) return false;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    unsigned char header[12] = {0};
+    file.read(reinterpret_cast<char*>(header), 12);
+    // JPEG
+    if (header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF) return true;
+    // PNG
+    if (header[0] == 0x89 && header[1] == 'P' && header[2] == 'N' && header[3] == 'G') return true;
+    // GIF
+    if (header[0] == 'G' && header[1] == 'I' && header[2] == 'F' && header[3] == '8') return true;
+    // WebP
+    if (header[0] == 'R' && header[1] == 'I' && header[2] == 'F' && header[3] == 'F' &&
+        header[8] == 'W' && header[9] == 'E' && header[10] == 'B' && header[11] == 'P') return true;
+    return false;
+}
+
 inline std::string upload_avatar(fluxerpp::cluster& bot, const std::string& input_url) {
     if (input_url.empty()) return "";
-    if (input_url.rfind(bot.config().autumn_url, 0) == 0) {
+    if (input_url.rfind("http://", 0) != 0 && input_url.rfind("https://", 0) != 0) {
+        return "";
+    }
+    if (input_url.rfind(bot.config().cdn_url, 0) == 0) {
         return input_url;
     }
     try {
         std::string file_id = bot.rest().upload_from_url(input_url);
-        if (!file_id.empty()) {
-            return bot.config().autumn_url + "/attachments/" + file_id;
+        if (!file_id.empty() && fluxerpp::utils::is_valid_ulid(file_id)) {
+            return bot.config().resolve_attachment_url(file_id);
         }
-    } catch (...) {
-        // Fall back to original url if download/upload fails
+    } catch (...) {}
+    return "";
+}
+
+inline std::optional<std::string> extract_file_id(const std::optional<std::string>& avatar_str) {
+    if (!avatar_str) return std::nullopt;
+    std::string s = *avatar_str;
+    if (fluxerpp::utils::is_valid_ulid(s)) {
+        return s;
     }
-    return input_url;
+    if (s.rfind("http://", 0) == 0 || s.rfind("https://", 0) == 0) {
+        size_t q = s.find_first_of("?#");
+        if (q != std::string::npos) s = s.substr(0, q);
+
+        std::vector<std::string> parts;
+        std::stringstream ss(s);
+        std::string item;
+        while (std::getline(ss, item, '/')) {
+            if (!item.empty()) parts.push_back(item);
+        }
+
+        if (!parts.empty()) {
+            std::string file_id = parts.back();
+            if (parts.size() >= 2 && file_id.find('.') != std::string::npos) {
+                file_id = parts[parts.size() - 2];
+            }
+            if (fluxerpp::utils::is_valid_ulid(file_id)) {
+                return file_id;
+            }
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+inline std::string get_raw_args(const fluxerpp::events::Message& msg, const std::string& command_name) {
+    std::string prefix = msg.prefix;
+    size_t start_pos = prefix.length() + command_name.length();
+    if (start_pos >= msg.content.length()) return "";
+    
+    size_t idx = start_pos;
+    while (idx < msg.content.length()) {
+        char c = msg.content[idx];
+        if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+            break;
+        }
+        idx++;
+    }
+    return msg.content.substr(idx);
+}
+
+inline std::vector<std::string> extract_member_roles(const fluxerpp::events::Message& msg) {
+    std::vector<std::string> roles;
+    if (msg.raw.contains("member") && msg.raw["member"].is_object()) {
+        const auto& m = msg.raw["member"];
+        if (m.contains("roles") && m["roles"].is_array()) {
+            for (const auto& r : m["roles"])
+                if (r.is_string()) roles.push_back(r.get<std::string>());
+        }
+    }
+    return roles;
+}
+
+inline bool passes_filter(const Database::AutoScopeFilter& f,
+                          const std::string& user_id,
+                          const std::string& channel_id,
+                          const std::vector<std::string>& member_roles) {
+    auto has_any = [](const std::vector<std::string>& list, const std::string& val) {
+        return std::find(list.begin(), list.end(), val) != list.end();
+    };
+    auto has_any_role = [&](const std::vector<std::string>& roles) {
+        for (const auto& r : member_roles)
+            if (has_any(roles, r)) return true;
+        return false;
+    };
+
+    // Channel allow/ignore
+    if (!f.allow_channels.empty() && !has_any(f.allow_channels, channel_id)) return false;
+    if (!f.ignore_channels.empty() && has_any(f.ignore_channels, channel_id)) return false;
+    // User allow/ignore
+    if (!f.allow_users.empty() && !has_any(f.allow_users, user_id)) return false;
+    if (!f.ignore_users.empty() && has_any(f.ignore_users, user_id)) return false;
+    // Role allow/ignore
+    if (!f.allow_roles.empty() && !has_any_role(f.allow_roles)) return false;
+    if (!f.ignore_roles.empty() && has_any_role(f.ignore_roles)) return false;
+    return true;
 }
 
 } // namespace bronx::helpers
 
 namespace bronx::cogs {
     using helpers::parse_duration;
+    using helpers::parse_duration_from_args;
+    using helpers::format_duration;
+    using helpers::get_raw_args;
+    using helpers::extract_member_roles;
+    using helpers::passes_filter;
 }

@@ -34,8 +34,8 @@ public:
             "",
             {"<subcommand>", "[args...]"},
             [](fluxerpp::cluster& bot, const fluxerpp::events::Message& msg, const std::vector<std::string>& args) {
-                if (msg.server_id.empty()) { bot.send_message(msg.channel_id, "⚠️ server only."); return; }
-                if (!bronx::g_db)          { bot.send_message(msg.channel_id, "⚠️ database unavailable."); return; }
+                if (msg.server_id.empty()) { bot.send_message(msg.channel_id, "" + bronx::emj_warning + " server only."); return; }
+                if (!bronx::g_db)          { bot.send_message(msg.channel_id, "" + bronx::emj_warning + " database unavailable."); return; }
 
                 std::string sub = args.empty() ? "" : args[0];
                 for (auto& c : sub) c = std::tolower((unsigned char)c);
@@ -91,7 +91,7 @@ public:
                     } else {
                         auto opt = bronx::g_db->filter_get_group(msg.server_id, grp_name);
                         if (!opt) {
-                            bot.send_message(msg.channel_id, "❌ group `" + grp_name + "` not found.");
+                            bot.send_message(msg.channel_id, "" + bronx::emj_no + " group `" + grp_name + "` not found.");
                             return;
                         }
                         auto& g = *opt;
@@ -125,9 +125,9 @@ public:
                 // ── all write subcommands require trusted/owner ───────────────
                 bot.fetch_member(msg.server_id, msg.author.id,
                     [&bot, msg, args, sub, pfx](fluxerpp::models::Member member, bool ok) {
-                        if (!ok) { bot.send_message(msg.channel_id, "⚠️ could not verify permissions."); return; }
+                        if (!ok) { bot.send_message(msg.channel_id, "" + bronx::emj_warning + " could not verify permissions."); return; }
                         if (!is_user_trusted_or_owner(bot, msg.server_id, msg.author.id, member)) {
-                            bot.send_message(msg.channel_id, "⚠️ you need manage server permission (or be a trusted user) to use this."); return;
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " you need manage server permission (or be a trusted user) to use this."); return;
                         }
 
                         auto reply = [&](const std::string& text) {
@@ -142,9 +142,9 @@ public:
                             std::string grp = args.size() > 1 ? args[1] : "";
                             if (grp.empty()) { reply("usage: `" + pfx + "filter create <group>`"); return; }
                             if (bronx::g_db->filter_create_group(msg.server_id, grp))
-                                reply("✅ filter group `" + grp + "` created.");
+                                reply("" + bronx::emj_yes + " filter group `" + grp + "` created.");
                             else
-                                reply("❌ failed to create group (it may already exist).");
+                                reply("" + bronx::emj_no + " failed to create group (it may already exist).");
                             return;
                         }
 
@@ -155,7 +155,7 @@ public:
                             if (bronx::g_db->filter_delete_group(msg.server_id, grp))
                                 reply("🗑️ filter group `" + grp + "` deleted.");
                             else
-                                reply("❌ group `" + grp + "` not found.");
+                                reply("" + bronx::emj_no + " group `" + grp + "` not found.");
                             return;
                         }
 
@@ -167,9 +167,9 @@ public:
                             // Auto-create default group if needed
                             if (grp == "default") bronx::g_db->filter_create_group(msg.server_id, "default");
                             if (bronx::g_db->filter_add_pattern(msg.server_id, grp, word))
-                                reply("✅ added `" + word + "` to group `" + grp + "`.");
+                                reply("" + bronx::emj_yes + " added `" + word + "` to group `" + grp + "`.");
                             else
-                                reply("❌ failed to add pattern. does group `" + grp + "` exist?");
+                                reply("" + bronx::emj_no + " failed to add pattern. does group `" + grp + "` exist?");
                             return;
                         }
 
@@ -179,9 +179,9 @@ public:
                             std::string grp  = args.size() > 2 ? args[2] : "default";
                             if (word.empty()) { reply("usage: `" + pfx + "filter remove <word> [group]`"); return; }
                             if (bronx::g_db->filter_remove_pattern(msg.server_id, grp, word))
-                                reply("✅ removed `" + word + "` from group `" + grp + "`.");
+                                reply("" + bronx::emj_yes + " removed `" + word + "` from group `" + grp + "`.");
                             else
-                                reply("❌ pattern not found in group `" + grp + "`.");
+                                reply("" + bronx::emj_no + " pattern not found in group `" + grp + "`.");
                             return;
                         }
 
@@ -201,7 +201,7 @@ public:
                             }
 
                             auto opt = bronx::g_db->filter_get_group(msg.server_id, grp);
-                            if (!opt) { reply("❌ group `" + grp + "` not found."); return; }
+                            if (!opt) { reply("" + bronx::emj_no + " group `" + grp + "` not found."); return; }
 
                             // Toggle: invert current state for the target scope
                             bool current  = Database::filter_group_active_in(*opt, channel_id.empty() ? msg.channel_id : channel_id);
@@ -209,24 +209,53 @@ public:
 
                             if (bronx::g_db->filter_toggle(msg.server_id, grp, channel_id, new_state)) {
                                 std::string scope = channel_id.empty() ? "server-wide" : "in <#" + channel_id + ">";
-                                reply("✅ group `" + grp + "` is now **" + std::string(new_state ? "enabled" : "disabled") + "** " + scope + ".");
+                                reply("" + bronx::emj_yes + " group `" + grp + "` is now **" + std::string(new_state ? "enabled" : "disabled") + "** " + scope + ".");
                             } else {
-                                reply("❌ failed to update group `" + grp + "`.");
+                                reply("" + bronx::emj_no + " failed to update group `" + grp + "`.");
                             }
                             return;
                         }
+
+                        auto resolve_whitelist_entry = [&](const std::string& input_entry) -> std::string {
+                            std::string cleaned = trim_quotes(input_entry);
+                            if (cleaned.size() > 3 && cleaned.front() == '<' && cleaned[1] == '#' && cleaned.back() == '>') {
+                                return "#" + cleaned.substr(2, cleaned.size() - 3);
+                            }
+                            if (cleaned.size() > 3 && cleaned.front() == '<' && cleaned[1] == '%' && cleaned.back() == '>') {
+                                return "%" + cleaned.substr(2, cleaned.size() - 3);
+                            }
+                            
+                            std::string name_to_check = cleaned;
+                            if (!name_to_check.empty() && (name_to_check[0] == '#' || name_to_check[0] == '%')) {
+                                name_to_check = name_to_check.substr(1);
+                            }
+
+                            auto srv_opt = bot.get_server(msg.server_id);
+                            if (srv_opt) {
+                                for (const auto& ch_id : srv_opt->channels) {
+                                    auto c_opt = bot.get_channel(ch_id);
+                                    if (c_opt && c_opt->name && *c_opt->name == name_to_check) {
+                                        return "#" + c_opt->id;
+                                    }
+                                }
+                                for (const auto& r : srv_opt->roles) {
+                                    if (r.name == name_to_check || r.id == name_to_check) {
+                                        return "%" + r.id;
+                                    }
+                                }
+                            }
+                            return cleaned;
+                        };
 
                         // ── whitelist ─────────────────────────────────────────
                         if (sub == "whitelist") {
                             std::string entry = args.size() > 1 ? args[1] : "";
                             if (entry.empty()) { reply("usage: `" + pfx + "filter whitelist <word|#channel|%role>`"); return; }
-                            // Normalise <#ID> → #ID
-                            if (entry.size() > 3 && entry.front() == '<' && entry[1] == '#' && entry.back() == '>')
-                                entry = "#" + entry.substr(2, entry.size() - 3);
-                            if (bronx::g_db->filter_whitelist_add(msg.server_id, entry))
-                                reply("✅ added `" + entry + "` to the server whitelist.");
+                            std::string resolved = resolve_whitelist_entry(entry);
+                            if (bronx::g_db->filter_whitelist_add(msg.server_id, resolved))
+                                reply("" + bronx::emj_yes + " added `" + entry + "` (resolved: `" + resolved + "`) to the server whitelist.");
                             else
-                                reply("❌ failed to update whitelist.");
+                                reply("" + bronx::emj_no + " failed to update whitelist.");
                             return;
                         }
 
@@ -234,12 +263,11 @@ public:
                         if (sub == "unwhitelist") {
                             std::string entry = args.size() > 1 ? args[1] : "";
                             if (entry.empty()) { reply("usage: `" + pfx + "filter unwhitelist <word|#channel|%role>`"); return; }
-                            if (entry.size() > 3 && entry.front() == '<' && entry[1] == '#' && entry.back() == '>')
-                                entry = "#" + entry.substr(2, entry.size() - 3);
-                            if (bronx::g_db->filter_whitelist_remove(msg.server_id, entry))
-                                reply("✅ removed `" + entry + "` from the server whitelist.");
+                            std::string resolved = resolve_whitelist_entry(entry);
+                            if (bronx::g_db->filter_whitelist_remove(msg.server_id, resolved))
+                                reply("" + bronx::emj_yes + " removed `" + entry + "` (resolved: `" + resolved + "`) from the server whitelist.");
                             else
-                                reply("❌ `" + entry + "` was not in the whitelist.");
+                                reply("" + bronx::emj_no + " `" + entry + "` (resolved: `" + resolved + "`) was not in the whitelist.");
                             return;
                         }
 
@@ -270,8 +298,30 @@ public:
 
         // Check author's roles against whitelist
         auto member = bot.get_member(msg.server_id, msg.author.id);
+        std::vector<std::string> roles;
+        fluxerpp::models::Member fetched_member;
+        bool has_member = false;
         if (member) {
-            for (const auto& role_id : member->roles) {
+            fetched_member = *member;
+            has_member = true;
+            roles = member->roles;
+        } else {
+            auto res = bot.rest().get_server_member(msg.server_id, msg.author.id);
+            if (res.success()) {
+                fetched_member = fluxerpp::models::Member::from_json(res.body);
+                has_member = true;
+                roles = fetched_member.roles;
+                bot.cache_member(fetched_member);
+            }
+        }
+
+        // Bypass for server owner or trusted users
+        if (has_member && is_user_trusted_or_owner(bot, msg.server_id, msg.author.id, fetched_member)) {
+            return false;
+        }
+
+        if (has_member) {
+            for (const auto& role_id : roles) {
                 if (std::find(wl.entries.begin(), wl.entries.end(), "%" + role_id) != wl.entries.end())
                     return false;
             }

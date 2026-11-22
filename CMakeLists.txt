@@ -14,10 +14,10 @@ if(ipo_supported)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
-# Add the parent directory containing the fluxerpp library
 add_subdirectory(.. fluxerpp_build)
 
-add_executable(bronx main.cpp)
+file(GLOB DATABASE_SOURCES database/*.cpp)
+add_executable(bronx main.cpp i18n.cpp ${DATABASE_SOURCES})
 
 find_path(MARIADB_INCLUDE_DIR mysql.h
     PATHS
@@ -46,7 +46,6 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(TESSERACT REQUIRED tesseract)
 pkg_check_modules(LEPTONICA REQUIRED lept)
 
-# Cairo chart renderer
 list(APPEND CMAKE_PREFIX_PATH /home/linuxbrew/.linuxbrew)
 set(ENV{PKG_CONFIG_PATH} "/home/linuxbrew/.linuxbrew/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
 pkg_check_modules(CAIRO cairo)
@@ -65,7 +64,6 @@ target_include_directories(bronx PRIVATE
     $<$<BOOL:${CAIRO_FOUND}>:${CAIRO_INCLUDE_DIRS}>
 )
 
-# Link against fluxerpp, mariadb, tesseract, leptonica, and (optionally) Cairo
 target_link_libraries(bronx PRIVATE
     fluxerpp
     ${MARIADB_LIBRARY}

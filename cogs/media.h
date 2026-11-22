@@ -180,7 +180,7 @@ inline bool download_file_system(const std::string& url, const std::string& outp
 // ---------------------------------------------------------------------------
 inline void process_ocr_request(fluxerpp::cluster& bot, const std::string& url, uint64_t size, std::function<void(const std::string& error_msg, const std::vector<std::string>& pages)> callback) {
     if (size > 8 * 1024 * 1024) {
-        callback("❌ image is too large (max 8MB).", {});
+        callback("" + bronx::emj_no + " image is too large (max 8MB).", {});
         return;
     }
 
@@ -189,7 +189,7 @@ inline void process_ocr_request(fluxerpp::cluster& bot, const std::string& url, 
     if (temp_url.rfind("https://", 0) == 0) { scheme = "https://"; temp_url = temp_url.substr(8); }
     else if (temp_url.rfind("http://", 0) == 0) { scheme = "http://"; temp_url = temp_url.substr(7); }
     else {
-        callback("❌ invalid image URL.", {});
+        callback("" + bronx::emj_no + " invalid image URL.", {});
         return;
     }
     
@@ -209,14 +209,14 @@ inline void process_ocr_request(fluxerpp::cluster& bot, const std::string& url, 
     
     auto res = cli.Get(path);
     if (!res || res->status != 200) {
-        callback("❌ failed to download image.", {});
+        callback("" + bronx::emj_no + " failed to download image.", {});
         return;
     }
 
     tesseract::TessBaseAPI* api = new tesseract::TessBaseAPI();
     if (api->Init(nullptr, "eng")) {
         delete api;
-        callback("❌ failed to initialize OCR engine.", {});
+        callback("" + bronx::emj_no + " failed to initialize OCR engine.", {});
         return;
     }
 
@@ -224,7 +224,7 @@ inline void process_ocr_request(fluxerpp::cluster& bot, const std::string& url, 
     if (!pix) {
         api->End();
         delete api;
-        callback("❌ failed to process image format.", {});
+        callback("" + bronx::emj_no + " failed to process image format.", {});
         return;
     }
 
@@ -250,7 +250,7 @@ inline void process_ocr_request(fluxerpp::cluster& bot, const std::string& url, 
     }
 
     if (text.empty()) {
-        callback("❌ no text detected in the image.", {});
+        callback("" + bronx::emj_no + " no text detected in the image.", {});
         return;
     }
 
@@ -316,10 +316,9 @@ public:
                         std::string id;
                         { std::lock_guard<std::mutex> lk(*ack_mutex); id = *ack_id; }
                         if (!id.empty()) {
-                            bot.edit_message(msg.channel_id, id, payload);
-                        } else {
-                            bot.send_message(msg.channel_id, payload);
+                            bot.delete_message(msg.channel_id, id);
                         }
+                        bot.send_message(msg.channel_id, payload);
                     };
 
                     std::string final_url = target_url;
@@ -341,7 +340,7 @@ public:
                     }
                     
                     if (final_url.empty() || final_url.find("http") == std::string::npos) {
-                        reply_or_edit("❌ please provide a valid media URL or reply to a message containing one.");
+                        reply_or_edit("" + bronx::emj_no + " please provide a valid media URL or reply to a message containing one.");
                         return;
                     }
                     
@@ -445,7 +444,7 @@ public:
                     }
                     
                     if (!download_ok) {
-                        reply_or_edit("❌ failed to download media. URL may be invalid or platform is unsupported.");
+                        reply_or_edit("" + bronx::emj_no + " failed to download media. URL may be invalid or platform is unsupported.");
                         std::filesystem::remove_all(temp_dir);
                         return;
                     }
@@ -465,32 +464,22 @@ public:
                             payload.add_attachment(file_id);
                             
                             if (meta.success) {
-                                fluxerpp::models::Embed embed;
-                                embed.set_title(meta.title);
-                                if (!meta.description.empty()) {
-                                    std::string desc = meta.description;
-                                    if (desc.size() > 250) desc = desc.substr(0, 247) + "...";
-                                    embed.set_description(desc);
+                                std::string title_line = "🎥 **" + meta.title + "**";
+                                if (!meta.uploader.empty() && meta.uploader != "Unknown") {
+                                    title_line += " by *" + meta.uploader + "*";
                                 }
-                                if (!meta.thumbnail.empty()) {
-                                    std::string thumb_id = bot.rest().upload_from_url(meta.thumbnail, "thumb.png", "image/png");
-                                    if (!thumb_id.empty()) {
-                                        embed.set_image(thumb_id);
-                                    }
-                                }
-                                embed.set_colour("#ff007f");
-                                payload.add_embed(embed);
+                                payload.set_content(title_line);
                             }
                             
                             reply_or_edit_payload(payload);
                         } else {
-                            reply_or_edit("❌ failed to upload media to server.");
+                            reply_or_edit("" + bronx::emj_no + " failed to upload media to server.");
                         }
                     } else {
                         // Upload to Catbox
                         std::string hosted_url = upload_to_catbox(out_path);
                         if (hosted_url.empty() || hosted_url.find("http") == std::string::npos) {
-                            reply_or_edit("❌ file size too large and failover host upload failed.");
+                            reply_or_edit("" + bronx::emj_no + " file size too large and failover host upload failed.");
                         } else {
                             fluxerpp::models::MessagePayload payload;
                             payload.set_content("🚀 **video is too large for direct upload!**\nview/download here: " + hosted_url);
@@ -557,7 +546,7 @@ public:
                     }
                     
                     if (final_url.empty() || final_url.find("http") == std::string::npos) {
-                        bot.send_message(msg.channel_id, "❌ please provide a valid media URL or reply to a message containing one.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " please provide a valid media URL or reply to a message containing one.");
                         return;
                     }
                     
@@ -575,7 +564,7 @@ public:
                     std::string out_path = temp_dir + "/output.gif";
                     
                     if (!download_file_system(final_url, in_path)) {
-                        bot.send_message(msg.channel_id, "❌ failed to download input file.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " failed to download input file.");
                         std::filesystem::remove_all(temp_dir);
                         return;
                     }
@@ -588,7 +577,7 @@ public:
                     int status = std::system(cmd.c_str());
                     
                     if (status != 0 || !std::filesystem::exists(out_path) || std::filesystem::file_size(out_path) == 0) {
-                        bot.send_message(msg.channel_id, "❌ failed to convert media to GIF. Check if it's a valid video/image.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " failed to convert media to GIF. Check if it's a valid video/image.");
                         std::filesystem::remove_all(temp_dir);
                         return;
                     }
@@ -606,7 +595,7 @@ public:
                         payload.add_attachment(file_id);
                         bot.send_message(msg.channel_id, payload);
                     } else {
-                        bot.send_message(msg.channel_id, "❌ failed to upload converted GIF to server.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " failed to upload converted GIF to server.");
                     }
                     
                     std::filesystem::remove_all(temp_dir);
@@ -656,7 +645,7 @@ public:
                     }
                     
                     if (final_url.empty() || final_url.find("http") == std::string::npos) {
-                        bot.send_message(msg.channel_id, "❌ please provide a valid image URL or reply to an image.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " please provide a valid image URL or reply to an image.");
                         return;
                     }
                     

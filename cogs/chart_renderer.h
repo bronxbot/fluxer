@@ -2,12 +2,12 @@
 // ============================================================
 //  chart_renderer.h — Cairo PNG chart generation for bronx
 //  Renders bar / line / heatmap / pie / scatter charts into
-//  in-memory PNG bytes, then uploads to Revolt's Autumn CDN.
+//  in-memory PNG bytes, then uploads to Revolt's Fluxer CDN.
 //
 //  Usage:
 //    std::string png = chart::render_line_chart(...);
-//    std::string autumn_id = chart::upload_chart(bot, png);
-//    embed.set_image(autumn_id);
+//    std::string media_id = chart::upload_chart(bot, png);
+//    embed.set_image(media_id);
 // ============================================================
 
 #include <cairo/cairo.h>
@@ -191,8 +191,10 @@ inline void get_current_font_settings(cairo_t* cr, double& size, bool& bold) {
 }
 
 // ── text helpers ───────────────────────────────────────────────
+thread_local std::string g_current_font_family = "sans-serif";
+
 inline void set_font(cairo_t* cr, double size, bool bold = false) {
-    cairo_select_font_face(cr, "sans-serif",
+    cairo_select_font_face(cr, g_current_font_family.c_str(),
         CAIRO_FONT_SLANT_NORMAL,
         bold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, size);
@@ -211,7 +213,7 @@ inline double text_width(cairo_t* cr, const std::string& s) {
         if (run.is_emoji) {
             cairo_select_font_face(cr, "Twemoji", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
         } else {
-            cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, 
+            cairo_select_font_face(cr, g_current_font_family.c_str(), CAIRO_FONT_SLANT_NORMAL, 
                                    bold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
         }
         cairo_set_font_size(cr, size);
@@ -236,7 +238,7 @@ inline void draw_text(cairo_t* cr, const std::string& s) {
         if (run.is_emoji) {
             cairo_select_font_face(cr, "Twemoji", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
         } else {
-            cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, 
+            cairo_select_font_face(cr, g_current_font_family.c_str(), CAIRO_FONT_SLANT_NORMAL, 
                                    bold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
         }
         cairo_set_font_size(cr, size);
@@ -272,9 +274,9 @@ struct ScatterPoint  { double x; double y; };
 struct ScatterSeries { std::string name; RGBA colour; std::vector<ScatterPoint> points; };
 struct BarSeries     { std::string name; RGBA colour; std::vector<int64_t> values; };
 
-// ── Autumn upload helper ───────────────────────────────────────
-// Takes raw PNG bytes (from any render_* call) and uploads them to Autumn.
-// Returns the Autumn file ID to use as Embed::media, or "" on failure.
+// ── Fluxer CDN upload helper ───────────────────────────────────────
+// Takes raw PNG bytes (from any render_* call) and uploads them to Fluxer CDN.
+// Returns the Fluxer CDN file ID to use as Embed::media, or "" on failure.
 // Must be called from a non-gateway thread (does HTTP I/O).
 inline std::string upload_chart(fluxerpp::cluster& bot, const std::string& png_bytes,
                                  const std::string& filename = "chart.png") {
@@ -285,9 +287,9 @@ inline std::string upload_chart(fluxerpp::cluster& bot, const std::string& png_b
         if (res.success() && res.body.contains("id") && res.body["id"].is_string()) {
             return res.body["id"].get<std::string>();
         }
-        std::cerr << "[bronx chart] autumn upload failed: " << res.body.dump() << "\n";
+        std::cerr << "[bronx chart] chart upload failed: " << res.body.dump() << "\n";
     } catch (const std::exception& e) {
-        std::cerr << "[bronx chart] autumn upload exception: " << e.what() << "\n";
+        std::cerr << "[bronx chart] chart upload exception: " << e.what() << "\n";
     }
     return "";
 }
@@ -941,6 +943,281 @@ inline std::string render_scatter_chart(
     cairo_surface_write_to_png_stream(surface, png_write_cb, &buf);
     cairo_destroy(cr);
     cairo_surface_destroy(surface);
+    return buf.data;
+}
+
+inline bool parse_hex_color(const std::string& hex, RGBA& out, double default_alpha = 1.0) {
+    if (hex.empty()) return false;
+    std::string clean = hex;
+    if (clean[0] == '#') {
+        clean = clean.substr(1);
+    }
+    if (clean.length() == 3) {
+        std::string expanded = "";
+        expanded += clean[0]; expanded += clean[0];
+        expanded += clean[1]; expanded += clean[1];
+        expanded += clean[2]; expanded += clean[2];
+        clean = expanded;
+    }
+    if (clean.length() != 6 && clean.length() != 8) return false;
+    
+    try {
+        unsigned int r = std::stoul(clean.substr(0, 2), nullptr, 16);
+        unsigned int g = std::stoul(clean.substr(2, 2), nullptr, 16);
+        unsigned int b = std::stoul(clean.substr(4, 2), nullptr, 16);
+        double a = default_alpha;
+        if (clean.length() == 8) {
+            a = std::stoul(clean.substr(6, 2), nullptr, 16) / 255.0;
+        }
+        out = { r / 255.0, g / 255.0, b / 255.0, a };
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+// ========================================================================
+//  render_rank_card
+//  Sleek image rank card containing: avatar (circular), username, level,
+//  rank, and progress bar showing progress to next level.
+// ========================================================================
+inline std::string render_rank_card(
+        const std::string& username,
+        uint32_t level,
+        int rank,
+        int total_users,
+        uint64_t current_xp,
+        uint64_t next_xp,
+        uint64_t base_xp,
+        const std::string& avatar_path,
+        const std::string& bg_image_path = "",
+        const std::string& bg_color_hex = "",
+        const std::string& bar_active_hex = "",
+        const std::string& bar_dimmed_hex = "",
+        const std::string& text_color_hex = "",
+        const std::string& font_name = "")
+{
+    const int width = 800;
+    const int height = 220;
+
+    // Set custom font family if provided
+    g_current_font_family = font_name.empty() ? "sans-serif" : font_name;
+
+    auto* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+    auto* cr      = cairo_create(surface);
+
+    cairo_surface_t* bg_surface = nullptr;
+    if (!bg_image_path.empty()) {
+        bg_surface = cairo_image_surface_create_from_png(bg_image_path.c_str());
+        if (cairo_surface_status(bg_surface) != CAIRO_STATUS_SUCCESS) {
+            cairo_surface_destroy(bg_surface);
+            bg_surface = nullptr;
+        }
+    }
+
+    // Resolve colors
+    RGBA card_bg = COL_CARD;
+    if (!bg_color_hex.empty()) {
+        parse_hex_color(bg_color_hex, card_bg);
+    }
+
+    RGBA act_col = COL_ACCENT;
+    bool has_act = !bar_active_hex.empty() && parse_hex_color(bar_active_hex, act_col);
+
+    RGBA dim_bar_col = {1.0, 1.0, 1.0, 0.08};
+    if (!bar_dimmed_hex.empty()) {
+        parse_hex_color(bar_dimmed_hex, dim_bar_col, 0.2); // Default alpha 0.2 for dimmed bar
+    }
+
+    RGBA txt_col = {1.0, 1.0, 1.0, 0.95};
+    bool has_txt = !text_color_hex.empty() && parse_hex_color(text_color_hex, txt_col);
+
+    RGBA txt_dim = COL_DIM;
+    if (has_txt) {
+        txt_dim = { txt_col.r, txt_col.g, txt_col.b, 0.6 };
+    }
+
+    // Draw background
+    round_rect(cr, 0, 0, width, height, 16);
+    set_colour(cr, card_bg);
+    cairo_fill_preserve(cr);
+    
+    // Draw card border
+    set_colour(cr, COL_BORDER);
+    cairo_set_line_width(cr, 1.5);
+    cairo_stroke(cr);
+
+    // Background custom image
+    if (bg_surface) {
+        cairo_save(cr);
+        round_rect(cr, 0, 0, width, height, 16);
+        cairo_clip(cr);
+        
+        int w = cairo_image_surface_get_width(bg_surface);
+        int h = cairo_image_surface_get_height(bg_surface);
+        
+        double scale_x = (double)width / w;
+        double scale_y = (double)height / h;
+        
+        cairo_scale(cr, scale_x, scale_y);
+        cairo_set_source_surface(cr, bg_surface, 0, 0);
+        cairo_paint(cr);
+        cairo_restore(cr);
+        cairo_surface_destroy(bg_surface);
+    } else {
+        // Background subtle glow in top-right (only if no custom image is drawn)
+        cairo_pattern_t* glow = cairo_pattern_create_radial(width - 50, 50, 10, width - 50, 50, 180);
+        cairo_pattern_add_color_stop_rgba(glow, 0.0, act_col.r, act_col.g, act_col.b, 0.15);
+        cairo_pattern_add_color_stop_rgba(glow, 1.0, act_col.r, act_col.g, act_col.b, 0.0);
+        cairo_set_source(cr, glow);
+        cairo_arc(cr, width - 50, 50, 180, 0, 2 * M_PI);
+        cairo_fill(cr);
+        cairo_pattern_destroy(glow);
+    }
+
+    // CX, CY, Radius for circular avatar
+    const double avatar_cx = 80.0;
+    const double avatar_cy = 110.0;
+    const double avatar_r  = 50.0;
+
+    cairo_surface_t* avatar_surface = nullptr;
+    if (!avatar_path.empty()) {
+        avatar_surface = cairo_image_surface_create_from_png(avatar_path.c_str());
+        if (cairo_surface_status(avatar_surface) != CAIRO_STATUS_SUCCESS) {
+            cairo_surface_destroy(avatar_surface);
+            avatar_surface = nullptr;
+        }
+    }
+
+    if (avatar_surface) {
+        cairo_save(cr);
+        cairo_arc(cr, avatar_cx, avatar_cy, avatar_r, 0, 2 * M_PI);
+        cairo_clip(cr);
+        
+        int w = cairo_image_surface_get_width(avatar_surface);
+        int h = cairo_image_surface_get_height(avatar_surface);
+        
+        cairo_translate(cr, avatar_cx - avatar_r, avatar_cy - avatar_r);
+        cairo_scale(cr, (avatar_r * 2.0) / w, (avatar_r * 2.0) / h);
+        cairo_set_source_surface(cr, avatar_surface, 0, 0);
+        cairo_paint(cr);
+        cairo_restore(cr);
+        
+        cairo_surface_destroy(avatar_surface);
+    } else {
+        // Draw elegant gradient circle for fallback avatar
+        cairo_save(cr);
+        cairo_arc(cr, avatar_cx, avatar_cy, avatar_r, 0, 2 * M_PI);
+        cairo_clip(cr);
+        
+        cairo_pattern_t* grad = cairo_pattern_create_linear(avatar_cx - avatar_r, avatar_cy - avatar_r, 
+                                                            avatar_cx + avatar_r, avatar_cy + avatar_r);
+        cairo_pattern_add_color_stop_rgba(grad, 0.0, act_col.r, act_col.g, act_col.b, 1.0);
+        cairo_pattern_add_color_stop_rgba(grad, 1.0, COL_BLUE.r, COL_BLUE.g, COL_BLUE.b, 1.0);
+        cairo_set_source(cr, grad);
+        cairo_paint(cr);
+        cairo_pattern_destroy(grad);
+        cairo_restore(cr);
+
+        // Render first letter of username
+        std::string initial = username.empty() ? "?" : username.substr(0, 1);
+        std::transform(initial.begin(), initial.end(), initial.begin(), ::toupper);
+        set_font(cr, 42, true);
+        set_colour(cr, txt_col);
+        double iw = text_width(cr, initial);
+        cairo_move_to(cr, avatar_cx - iw / 2, avatar_cy + 15);
+        cairo_show_text(cr, initial.c_str());
+    }
+
+    // Border around avatar
+    cairo_set_line_width(cr, 2.0);
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.15);
+    cairo_arc(cr, avatar_cx, avatar_cy, avatar_r + 1.0, 0, 2 * M_PI);
+    cairo_stroke(cr);
+
+    // Draw user name
+    std::string name_display = shorten_utf8_label(username, 24);
+    set_font(cr, 28, true);
+    set_colour(cr, txt_col);
+    cairo_move_to(cr, 160, 75);
+    cairo_show_text(cr, name_display.c_str());
+
+    // Progress percentage
+    double pct = 0.0;
+    uint64_t xp_in_level = 0;
+    uint64_t xp_required_for_level = 0;
+    if (next_xp > base_xp && current_xp >= base_xp) {
+        xp_in_level = current_xp - base_xp;
+        xp_required_for_level = next_xp - base_xp;
+        pct = (double)xp_in_level / xp_required_for_level;
+    }
+    if (pct > 1.0) pct = 1.0;
+    if (pct < 0.0) pct = 0.0;
+
+    // Draw Level Info
+    set_font(cr, 18, true);
+    set_colour(cr, act_col);
+    cairo_move_to(cr, 160, 115);
+    std::string lvl_str = "LEVEL " + std::to_string(level);
+    cairo_show_text(cr, lvl_str.c_str());
+
+    // Draw Rank Info
+    set_font(cr, 15, false);
+    set_colour(cr, txt_dim);
+    cairo_move_to(cr, 160 + text_width(cr, lvl_str) + 20, 115);
+    std::string rnk_str = "RANK #" + std::to_string(rank) + " OF " + std::to_string(total_users);
+    cairo_show_text(cr, rnk_str.c_str());
+
+    // Draw XP text (right-aligned)
+    set_font(cr, 14, false);
+    set_colour(cr, txt_dim);
+    std::string xp_str = fmt_num(xp_in_level) + " / " + fmt_num(xp_required_for_level) + " XP (" + std::to_string((int)(pct * 100)) + "%)";
+    double xw = text_width(cr, xp_str);
+    cairo_move_to(cr, 760 - xw, 115);
+    cairo_show_text(cr, xp_str.c_str());
+
+    // Progress Bar Coordinates
+    const double bar_x = 160.0;
+    const double bar_y = 135.0;
+    const double bar_w = 600.0;
+    const double bar_h = 18.0;
+    const double bar_r = 9.0;
+
+    // Background capsule of progress bar
+    round_rect(cr, bar_x, bar_y, bar_w, bar_h, bar_r);
+    cairo_set_source_rgba(cr, dim_bar_col.r, dim_bar_col.g, dim_bar_col.b, dim_bar_col.a);
+    cairo_fill(cr);
+
+    // Progress bar fill (gradient)
+    if (pct > 0.0) {
+        cairo_save(cr);
+        round_rect(cr, bar_x, bar_y, pct * bar_w, bar_h, bar_r);
+        cairo_clip(cr);
+
+        cairo_pattern_t* pat = cairo_pattern_create_linear(bar_x, 0, bar_x + bar_w, 0);
+        if (has_act) {
+            cairo_pattern_add_color_stop_rgba(pat, 0.0, act_col.r, act_col.g, act_col.b, 1.0);
+            cairo_pattern_add_color_stop_rgba(pat, 1.0, act_col.r * 0.7, act_col.g * 0.7, act_col.b * 0.7, 1.0);
+        } else {
+            cairo_pattern_add_color_stop_rgba(pat, 0.0, COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, 1.0);
+            cairo_pattern_add_color_stop_rgba(pat, 1.0, 0.486, 0.227, 0.929, 1.0);
+        }
+        cairo_set_source(cr, pat);
+        
+        round_rect(cr, bar_x, bar_y, pct * bar_w, bar_h, bar_r);
+        cairo_fill(cr);
+        cairo_pattern_destroy(pat);
+        cairo_restore(cr);
+    }
+
+    PngBuffer buf;
+    cairo_surface_write_to_png_stream(surface, png_write_cb, &buf);
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+
+    // Reset font to default sans-serif for next calls
+    g_current_font_family = "sans-serif";
+
     return buf.data;
 }
 

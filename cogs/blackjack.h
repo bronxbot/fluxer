@@ -125,7 +125,7 @@ public:
     void dealer_turn(BJGame& game, std::string& outcome, int64_t& payout) {
         int player_score = calculate_hand(game.player_hand);
         if (player_score > 21) {
-            outcome = "**you busted!** dealer wins.";
+            outcome = "busted. dealer wins.";
             payout = 0;
             return;
         }
@@ -138,16 +138,16 @@ public:
         }
 
         if (dealer_score > 21) {
-            outcome = "**dealer busted!** you win!";
+            outcome = "dealer busted. player wins.";
             payout = game.bet * 2;
         } else if (player_score > dealer_score) {
-            outcome = "**you won!** you beat the dealer.";
+            outcome = "player won. score beats dealer.";
             payout = game.bet * 2;
         } else if (player_score < dealer_score) {
-            outcome = "**dealer wins!** better luck next time.";
+            outcome = "dealer wins.";
             payout = 0;
         } else {
-            outcome = "**push!** bets have been refunded.";
+            outcome = "push. bets refunded.";
             payout = game.bet;
         }
     }
@@ -156,17 +156,17 @@ public:
         int player_score = calculate_hand(game.player_hand);
         int dealer_score = calculate_hand(game.dealer_hand);
         if (player_score == 21 && dealer_score == 21) {
-            outcome = "**push!** both you and the dealer got blackjack.";
+            outcome = "push. both got blackjack.";
             payout = game.bet;
             return true;
         }
         if (player_score == 21) {
-            outcome = "**blackjack!** you win!";
+            outcome = "blackjack. player wins.";
             payout = static_cast<int64_t>(game.bet * 2.5);
             return true;
         }
         if (dealer_score == 21) {
-            outcome = "**dealer got blackjack!** dealer wins.";
+            outcome = "dealer got blackjack. dealer wins.";
             payout = 0;
             return true;
         }
@@ -265,23 +265,23 @@ public:
         bool target_bust = (target_score > 21);
 
         if (challenger_bust && target_bust) {
-            outcome = "**both players busted!** push — bets refunded.";
+            outcome = "both players busted. push — bets refunded.";
             g_db->update_balances(game.user_id, challenger_contrib, 0);
             g_db->update_balances(game.target_id, target_contrib, 0);
         } else if (challenger_bust) {
-            outcome = "🏆 <@" + game.target_id + "> wins! <@" + game.user_id + "> busted.";
+            outcome = "<@" + game.target_id + "> wins. <@" + game.user_id + "> busted.";
             g_db->update_balances(game.target_id, pool, 0);
         } else if (target_bust) {
-            outcome = "🏆 <@" + game.user_id + "> wins! <@" + game.target_id + "> busted.";
+            outcome = "<@" + game.user_id + "> wins. <@" + game.target_id + "> busted.";
             g_db->update_balances(game.user_id, pool, 0);
         } else if (challenger_score > target_score) {
-            outcome = "🏆 <@" + game.user_id + "> wins with **" + std::to_string(challenger_score) + "** against **" + std::to_string(target_score) + "**!";
+            outcome = "<@" + game.user_id + "> wins (" + std::to_string(challenger_score) + " vs " + std::to_string(target_score) + ").";
             g_db->update_balances(game.user_id, pool, 0);
         } else if (target_score > challenger_score) {
-            outcome = "🏆 <@" + game.target_id + "> wins with **" + std::to_string(target_score) + "** against **" + std::to_string(challenger_score) + "**!";
+            outcome = "<@" + game.target_id + "> wins (" + std::to_string(target_score) + " vs " + std::to_string(challenger_score) + ").";
             g_db->update_balances(game.target_id, pool, 0);
         } else {
-            outcome = "**push!** both players have the same score (**" + std::to_string(challenger_score) + "**). bets refunded.";
+            outcome = "push (" + std::to_string(challenger_score) + "). bets refunded.";
             g_db->update_balances(game.user_id, challenger_contrib, 0);
             g_db->update_balances(game.target_id, target_contrib, 0);
         }
@@ -633,7 +633,7 @@ public:
                     }
 
                     std::string bet_str = (bet > 0) ? "**" + std::to_string(bet) + "** coins" : "fun (no bet)";
-                    std::string invite_msg = "<@" + target_uid + ">, you have been challenged to a **blackjack** duel by <@" + msg.author.id + "> for " + bet_str + "!\nReact with ✅ to accept or ❌ to decline.";
+                    std::string invite_msg = "<@" + target_uid + ">, you have been challenged to a **blackjack** duel by <@" + msg.author.id + "> for " + bet_str + "!\nReact with " + bronx::emj_yes + " to accept or " + bronx::emj_no + " to decline.";
 
                     bot.send_message(msg.channel_id, invite_msg, [this, msg, target_uid, bet, &bot](fluxerpp::models::Message res, bool success) {
                         if (success) {
@@ -649,9 +649,9 @@ public:
                                 active_challenges_[res.id] = challenge;
                             }
 
-                            bot.react_to_message(msg.channel_id, res.id, "✅");
+                            bot.react_to_message(msg.channel_id, res.id, "" + bronx::emj_yes + "");
                             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                            bot.react_to_message(msg.channel_id, res.id, "❌");
+                            bot.react_to_message(msg.channel_id, res.id, "" + bronx::emj_no + "");
 
                             std::thread([this, &bot, channel_id = msg.channel_id, msg_id = res.id]() {
                                 std::this_thread::sleep_for(std::chrono::seconds(60));
@@ -772,13 +772,13 @@ public:
                 std::lock_guard<std::mutex> lock(challenge_mutex_);
                 auto it = active_challenges_.find(e.id);
                 if (it != active_challenges_.end() && e.user_id == it->second.target_id) {
-                    if (e.emoji_id == "✅") {
+                    if (e.emoji_id == "" + bronx::emj_yes + "") {
                         it->second.accepted = true;
                         challenge = it->second;
                         active_challenges_.erase(it);
                         is_challenge = true;
                         accepted = true;
-                    } else if (e.emoji_id == "❌") {
+                    } else if (e.emoji_id == "" + bronx::emj_no + "") {
                         challenge = it->second;
                         active_challenges_.erase(it);
                         is_challenge = true;
@@ -789,10 +789,10 @@ public:
 
             if (is_challenge) {
                 if (accepted) {
-                    bot.send_message(challenge.channel_id, "✅ <@" + challenge.target_id + "> accepted the challenge!");
+                    bot.send_message(challenge.channel_id, "" + bronx::emj_yes + " <@" + challenge.target_id + "> accepted the challenge!");
                     start_pvp_game(bot, challenge);
                 } else {
-                    bot.send_message(challenge.channel_id, "❌ <@" + challenge.target_id + "> declined the challenge.");
+                    bot.send_message(challenge.channel_id, "" + bronx::emj_no + " <@" + challenge.target_id + "> declined the challenge.");
                 }
                 return;
             }
